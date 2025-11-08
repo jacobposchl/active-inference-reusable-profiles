@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Results and data
+results/data/*.csv
+results/data/*.pkl
+results/data/*.npy
+results/data/*.h5
+results/data/*.json
+results/figures/*.png
+results/figures/*.pdf
+results/figures/*.jpg
+results/figures/*.svg
+
+# Keep directory structure but ignore contents
+!results/data/.gitkeep
+!results/figures/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Model checkpoints
+*.pth
+*.ckpt
+*.h5
+
+# Large files
+*.zip
+*.tar.gz
+*.rar
