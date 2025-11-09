@@ -7,8 +7,8 @@ import numpy as np
 import sys
 import os
 
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Add project root to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from config.experiment_config import *
 from src.environment import TwoArmedBandit
@@ -86,7 +86,6 @@ def main():
         policies = temp_agent.policies
         num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
         
-        import numpy as np
         value_fn = make_value_fn('M3',
                                 profiles=M3_DEFAULTS['profiles'],
                                 Z=np.array(M3_DEFAULTS['Z']),

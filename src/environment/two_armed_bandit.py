@@ -1,9 +1,9 @@
 """
 Two-armed bandit environment with reversal learning.
 """
+
 import numpy as np
 from pymdp import utils
-
 
 class TwoArmedBandit:
     """
@@ -36,6 +36,7 @@ class TwoArmedBandit:
         observation_rewards : list or None
             Reward observation labels
         """
+
         self.context_names = ['left_better', 'right_better']
         
         # Sample context if not provided
@@ -65,12 +66,12 @@ class TwoArmedBandit:
     def step(self, action):
         """
         Execute action and return observations.
-        
+        -----------
         Parameters:
         -----------
         action : str
             Action label (e.g., 'act_left', 'act_hint')
-            
+        --------
         Returns:
         --------
         observations : list of str
@@ -78,32 +79,33 @@ class TwoArmedBandit:
         """
         # Check for reversals
         if self.trial_count in self.reversal_schedule:
-            self.context = ('right_better' if self.context == 'left_better' 
-                          else 'left_better')
+            self.context = ('right_better' if self.context == 'left_better' else 'left_better')
         
         self.trial_count += 1
         
         # Generate observations based on action
+
+        # Are we just starting? 
         if action == "act_start":
             observed_hint = "null"
             observed_reward = "null"
             observed_choice = "observe_start"
-            
+        
+        # Did we ask for a hint? 
         elif action == "act_hint":
             # Sample hint based on context and hint probability
             if self.context == "left_better":
                 observed_hint = self.observation_hints[
-                    utils.sample(np.array([0.0, self.probability_hint, 
-                                          1.0 - self.probability_hint]))
+                    utils.sample(np.array([0.0, self.probability_hint, 1.0 - self.probability_hint]))
                 ]
             else:  # right_better
                 observed_hint = self.observation_hints[
-                    utils.sample(np.array([0.0, 1.0 - self.probability_hint, 
-                                          self.probability_hint]))
+                    utils.sample(np.array([0.0, 1.0 - self.probability_hint, self.probability_hint]))
                 ]
             observed_reward = "null"
             observed_choice = "observe_hint"
             
+        # Did we choose left? 
         elif action == "act_left":
             observed_hint = "null"
             # Sample reward based on context
@@ -118,7 +120,8 @@ class TwoArmedBandit:
                                           1.0 - self.probability_reward]))
                 ]
             observed_choice = "observe_left"
-            
+
+        # Did we choose right?  
         elif action == "act_right":
             observed_hint = "null"
             # Sample reward based on context

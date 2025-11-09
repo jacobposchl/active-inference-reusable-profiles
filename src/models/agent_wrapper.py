@@ -1,6 +1,7 @@
 """
 Agent wrapper classes for running simulations and tracking log-likelihoods.
 """
+
 import numpy as np
 from pymdp.agent import Agent
 from pymdp import utils
@@ -42,6 +43,7 @@ class AgentRunner:
         inference_horizon : int
             Planning horizon
         """
+
         self.value_fn = value_fn
         self.reward_mod_idx = reward_mod_idx
         
@@ -105,6 +107,7 @@ class AgentRunner:
         gamma_t : float
             Policy precision used this trial
         """
+        
         # Infer hidden states
         qs = self.agent.infer_states(obs_ids)
         

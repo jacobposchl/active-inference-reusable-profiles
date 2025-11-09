@@ -1,9 +1,9 @@
 """
 Value function implementations for M1, M2, and M3 models.
 """
+
 import numpy as np
 from pymdp.maths import softmax
-
 
 def make_values_M1(C_reward_logits=None, gamma=1.0, E_logits=None):
     """
@@ -25,6 +25,7 @@ def make_values_M1(C_reward_logits=None, gamma=1.0, E_logits=None):
     value_fn : function
         Value function that returns (C_t, E_t, gamma_t)
     """
+
     C_logits = np.asarray(C_reward_logits, float)
     E_logits = None if E_logits is None else np.asarray(E_logits, float)
     
@@ -58,6 +59,7 @@ def make_values_M2(C_reward_logits=None, gamma_schedule=None, E_logits=None):
     value_fn : function
         Value function that returns (C_t, E_t, gamma_t)
     """
+
     if gamma_schedule is None:
         # Default: precision inversely related to entropy
         def gamma_schedule(q_context_t, t, g_base=1.5, k=1.0):
@@ -83,8 +85,7 @@ def make_values_M2(C_reward_logits=None, gamma_schedule=None, E_logits=None):
     return value_fn
 
 
-def make_values_M3(profiles, Z, num_policies=None, policies=None, 
-                   num_actions_per_factor=None):
+def make_values_M3(profiles, Z, num_policies=None, policies=None, num_actions_per_factor=None):
     """
     Model 3: Profile model with state-conditional mixing.
     
@@ -111,6 +112,7 @@ def make_values_M3(profiles, Z, num_policies=None, policies=None,
     value_fn : function
         Value function that returns (C_t, E_t, gamma_t)
     """
+
     # Normalize Z
     Z = np.asarray(Z, float)
     Z /= Z.sum(axis=1, keepdims=True)
@@ -118,7 +120,9 @@ def make_values_M3(profiles, Z, num_policies=None, policies=None,
     K = len(profiles)  # Number of profiles
     
     # Extract profile parameters
+    # Shape: (2 profiles, 3 reward outcomes)
     PHI = np.stack([np.asarray(p['phi_logits'], float) for p in profiles], axis=0)
+    # Profile 1: low, Profile 2: high
     GAM = np.array([float(p['gamma']) for p in profiles])
     
     # Check if profiles have policy priors

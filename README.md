@@ -147,10 +147,8 @@ This work builds on the pymdp package:
 }
 ```
 
-## License
 
-[Specify your license here]
 
 ## Author
 
-[Your name/information]
+Jacob Poschl - jposchl@ucsc.edu

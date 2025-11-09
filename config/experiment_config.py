@@ -22,13 +22,15 @@ NUM_FACTORS = len(NUM_STATES)
 NUM_MODALITIES = len(NUM_OBS)
 
 # Environment parameters (generative process)
-PROBABILITY_HINT = 0.7
-PROBABILITY_REWARD = 0.8
+PROBABILITY_HINT = 0.7 # percent chance of correct hint (which arm is better) --- this create observation noise
+PROBABILITY_REWARD = 0.8 # percent chance of reward when choosing better arm. --- this creates outcome noise
 
 # Default experiment parameters
 DEFAULT_TRIALS = 200
 DEFAULT_REVERSAL_SCHEDULE = [30, 60, 90, 120, 150, 180]
+# probability of arm context flipping
 DEFAULT_CONTEXT_VOLATILITY = 0.05
+
 
 # Plotting parameters
 ROLLING_WINDOW = 7
@@ -37,11 +39,13 @@ FIG_DPI = 300
 
 # Model default parameters
 M1_DEFAULTS = {
+    # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
     'C_reward_logits': [0.0, -4.0, 2.0],
     'gamma': 1.2
 }
 
 M2_DEFAULTS = {
+    # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
     'C_reward_logits': [0.0, -4.0, 2.0],
     'gamma_base': 1.6,
     'entropy_k': 1.0
@@ -49,17 +53,23 @@ M2_DEFAULTS = {
 
 M3_DEFAULTS = {
     'profiles': [
-        {
-            'phi_logits': [0.0, -2.0, 1.5],
-            'xi_logits': [0.0, 0.5, 0.0, 0.0],
-            'gamma': 0.6
+        {   
+            # PROFILE 1: Has a slight bias toward information-seeking (hints)
+            # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
+            'phi_logits': [0.0, -2.0, 1.5], # Outcome preferences (C Vector)
+            # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
+            'xi_logits': [0.0, 0.5, 0.0, 0.0], # Policy preferences (E Vector)
+            'gamma': 0.6 # Low precision = exploratory / uncertain
         },
         {
+            # PROFILE 2: Avoids information-seeking, wants to exploit known good arm
+            # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
             'phi_logits': [0.0, -8.0, 4.0],
+            # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
             'xi_logits': [0.0, -1.0, 0.0, 0.0],
-            'gamma': 3.0
+            'gamma': 3.0 # High precision = exploitative / certain
         }
     ],
-    'Z': [[0.8, 0.2],
-          [0.2, 0.8]]
+    'Z': [[0.8, 0.2], # When context = left_better
+          [0.2, 0.8]] # When context = right_betterS
 }

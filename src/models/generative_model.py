@@ -67,7 +67,7 @@ def build_A(num_modalities, state_contexts, state_choices,
             A_reward[1, :, choice_index] = [p_reward, 1 - p_reward]  # loss
             A_reward[2, :, choice_index] = [1 - p_reward, p_reward]  # reward
     
-    # A[2]: Choice observations (one-to-one mapping)
+    # A[2]: Choice observations (one-to-one mapping) - we observe the choices we made
     A_choice = np.zeros((len(observation_choices), len(state_contexts), len(state_choices)))
     
     for choice_index in range(len(state_choices)):
@@ -80,8 +80,7 @@ def build_A(num_modalities, state_contexts, state_choices,
     return A
 
 
-def build_B(state_contexts, state_choices, action_contexts, action_choices,
-            context_volatility=0.0):
+def build_B(state_contexts, state_choices, action_contexts, action_choices, context_volatility=0.0):
     """
     Build transition matrix B: p(s_t | s_t-1, a_t-1).
     
@@ -103,6 +102,7 @@ def build_B(state_contexts, state_choices, action_contexts, action_choices,
     B : object array
         Transition matrices [B_context, B_choice]
     """
+
     B = utils.obj_array(2)
     
     # B[0]: Context transitions
@@ -149,6 +149,7 @@ def build_D(state_contexts, state_choices):
     D : object array
         Prior distributions [D_context, D_choice]
     """
+    
     D = utils.obj_array(2)
     
     # D[0]: Uniform prior over contexts
