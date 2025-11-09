@@ -54,22 +54,22 @@ M2_DEFAULTS = {
 M3_DEFAULTS = {
     'profiles': [
         {   
-            # PROFILE 1: Has a slight bias toward information-seeking (hints)
+            # PROFILE 0: For left_better context - exploitative
             # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-            'phi_logits': [0.0, -2.0, 1.5], # Outcome preferences (C Vector)
+            'phi_logits': [0.0, -4.0, 2.5], # Strong outcome preferences
             # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
-            'xi_logits': [0.0, 0.5, 0.0, 0.0], # Policy preferences (E Vector)
-            'gamma': 0.6 # Low precision = exploratory / uncertain
+            'xi_logits': [0.0, 0.0, 0.0, 0.0], # Neutral on actions
+            'gamma': 2.5 # Moderate-high precision
         },
         {
-            # PROFILE 2: Avoids information-seeking, wants to exploit known good arm
+            # PROFILE 1: For right_better context - exploitative
             # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-            'phi_logits': [0.0, -8.0, 4.0],
+            'phi_logits': [0.0, -4.0, 2.5], # Strong outcome preferences
             # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
-            'xi_logits': [0.0, -1.0, 0.0, 0.0],
-            'gamma': 3.0 # High precision = exploitative / certain
+            'xi_logits': [0.0, 0.0, 0.0, 0.0], # Neutral on actions
+            'gamma': 2.5 # Moderate-high precision
         }
     ],
-    'Z': [[0.8, 0.2], # When context = left_better
-          [0.2, 0.8]] # When context = right_betterS
+    'Z': [[1.0, 0.0], # When context = left_better -> use Profile 0
+          [0.0, 1.0]] # When context = right_better -> use Profile 1
 }
