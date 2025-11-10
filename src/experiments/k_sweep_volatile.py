@@ -1,11 +1,11 @@
 """
 K-sweep optimization for Variable Volatility task.
 
-This task has regime-dependent hint reliability:
-- Stable: 55% hint accuracy, slow reversals
-- Volatile: 95% hint accuracy, fast reversals
+This task has regime-dependent hint reliability and feedback informativeness:
+- Stable: 55% hint accuracy (unreliable), 85% reward prob (informative feedback)
+- Volatile: 95% hint accuracy (reliable), 50% reward prob (random/uninformative feedback)
 
-Different regimes should benefit from different profiles.
+Different regimes incentivize different strategies, allowing K>1 agents to specialize.
 """
 
 import numpy as np
@@ -65,15 +65,8 @@ class RegimeDependentBandit:
         # Take the step
         obs = self.bandit.step(action)
         
-        # Apply penalty for wrong choices in volatile regime
-        if regime and regime.get('penalty', 0) != 0:
-            # If action was a choice (left=1 or right=2), check if it was wrong
-            if action in [1, 2]:
-                # Check reward observation (modality 1, outcome 0=loss, 1=reward)
-                if obs[1] == 0:  # Got loss (wrong choice)
-                    # Apply penalty by modifying the reward observation
-                    # We'll track this separately for objective function
-                    pass  # Penalty handled in objective function
+        # Note: Penalties are handled in the objective function, not here
+        # This wrapper just passes through observations from the environment
         
         return obs
 
@@ -83,16 +76,19 @@ def create_regime_schedule():
     REVISED: Make regimes differ in INFORMATION SOURCE reliability
     
     STABLE regime (feedback-based learning):
-    - Hint accuracy: 55% (useless)
+    - Hint accuracy: 55% (useless, barely better than random)
     - Reward probability: 85% (reliable feedback signal)
     - Rare reversals: Learn from feedback
     → OPTIMAL: Ignore hints, learn from reward feedback
     
     VOLATILE regime (hint-based learning):
     - Hint accuracy: 95% (very reliable)
-    - Reward probability: 0% (NO FEEDBACK - can't tell if choice was correct!)
-    - Frequent reversals: Can't learn from uninformative feedback
-    → OPTIMAL: Must use hints because feedback is useless
+    - Reward probability: 50% (RANDOM FEEDBACK - uninformative!)
+    - Frequent reversals: Can't learn from random feedback
+    → OPTIMAL: Must use hints because feedback gives no information
+    
+    Key insight: reward_prob=0.5 means both arms give 50/50 reward/loss,
+    making feedback completely uninformative about which arm is better.
     """
     return [
         {'start': 0, 'type': 'stable', 
@@ -101,7 +97,7 @@ def create_regime_schedule():
          'reversals': [60]},
         
         {'start': 120, 'type': 'volatile', 
-         'hint_prob': 0.95, 'reward_prob': 0.0,  # ← KEY CHANGE!
+         'hint_prob': 0.95, 'reward_prob': 0.5,  # ← UNINFORMATIVE FEEDBACK!
          'penalty': -2.0,
          'reversals': [128, 136, 144, 152, 160, 168, 176, 184]},
         
@@ -111,7 +107,7 @@ def create_regime_schedule():
          'reversals': [260]},
         
         {'start': 320, 'type': 'volatile', 
-         'hint_prob': 0.95, 'reward_prob': 0.0,  # ← KEY CHANGE!
+         'hint_prob': 0.95, 'reward_prob': 0.5,  # ← UNINFORMATIVE FEEDBACK!
          'penalty': -2.0,
          'reversals': [328, 336, 344, 352, 360, 368, 376, 384]},
     ]
@@ -227,12 +223,12 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                 
                 # Track rewards (with penalties in volatile regime)
                 regime = env.get_current_regime()
-                if obs[1] == 1:  # Reward outcome
+                if obs[1] == 'observe_reward':  # Reward outcome
                     total_rewards += 1
-                elif obs[1] == 0 and action in ['act_left', 'act_right']:  # Loss from choice
+                elif obs[1] == 'observe_loss' and action in ['act_left', 'act_right']:  # Loss from choice
                     # Apply penalty if in penalty regime
                     if regime and regime.get('penalty', 0) != 0:
-                        total_rewards += regime['penalty']  # penalty is negative, e.g., -5.0
+                        total_rewards += regime['penalty']  # penalty is negative, e.g., -2.0
                     else:
                         total_rewards -= 1  # Standard loss
         
@@ -478,13 +474,13 @@ def main():
     print()
     print("  STABLE regime (exploitation-favored):")
     print("    - Hint accuracy: 55% (barely useful)")
-    print("    - Reward probability: 90% (easy to learn from feedback)")
+    print("    - Reward probability: 85% (reliable feedback signal)")
     print("    - Reversals: Rare (every 60 trials)")
     print("    → Optimal: Ignore hints, exploit learned preferences")
     print()
     print("  VOLATILE regime (exploration-favored):")
     print("    - Hint accuracy: 95% (very reliable)")
-    print("    - Reward probability: 65% (noisy feedback)")
+    print("    - Reward probability: 50% (RANDOM - uninformative feedback)")
     print("    - Reversals: Frequent (every 8 trials)")
     print("    → Optimal: Use hints to track rapid changes")
     print()
