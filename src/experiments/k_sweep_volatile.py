@@ -25,16 +25,19 @@ from pymdp import utils
 
 class RegimeDependentBandit:
     """
-    Bandit with regime-dependent hint reliability.
+    Bandit with regime-dependent hint reliability AND reward probability.
+    
+    Key idea: Different regimes have different trade-offs between
+    exploration (hints) and exploitation (direct choices).
     """
     
     def __init__(self, regime_schedule=None, **kwargs):
         from src.environment import TwoArmedBandit
         kwargs.pop('probability_hint', None)
-        self.bandit = TwoArmedBandit(probability_hint=0.7, **kwargs)
+        kwargs.pop('probability_reward', None)
+        self.bandit = TwoArmedBandit(probability_hint=0.7, probability_reward=0.8, **kwargs)
         self.regime_schedule = regime_schedule or []
         self.current_regime = None
-        self.base_hint_prob = 0.7
         
     def get_current_regime(self):
         """Get current regime based on trial count."""
@@ -45,10 +48,12 @@ class RegimeDependentBandit:
         return current
     
     def step(self, action):
-        """Override step to use regime-dependent hint probability."""
+        """Override step to use regime-dependent parameters."""
         regime = self.get_current_regime()
         if regime:
-            self.bandit.probability_hint = regime.get('hint_prob', self.base_hint_prob)
+            # Update regime-specific parameters
+            self.bandit.probability_hint = regime.get('hint_prob', 0.7)
+            self.bandit.probability_reward = regime.get('reward_prob', 0.8)
             self.current_regime = regime['type']
             
             # Check for reversals
@@ -61,13 +66,36 @@ class RegimeDependentBandit:
 
 
 def create_regime_schedule():
-    """Create regime schedule with varying hint reliability."""
+    """
+    Create regime schedule with COMPLEMENTARY trade-offs.
+    
+    STABLE regime:
+    - High reward probability (0.9): Easy to learn from feedback alone
+    - Low hint accuracy (0.55): Hints barely better than chance
+    - Rare reversals: Can exploit learned preferences
+    → OPTIMAL STRATEGY: Ignore hints, exploit directly
+    
+    VOLATILE regime:
+    - Low reward probability (0.65): Noisy feedback, hard to learn
+    - High hint accuracy (0.95): Hints very reliable
+    - Frequent reversals: Need to track rapid changes
+    → OPTIMAL STRATEGY: Use hints to guide choices
+    """
     return [
-        {'start': 0, 'type': 'stable', 'hint_prob': 0.55, 'reversals': [60]},
-        {'start': 120, 'type': 'volatile', 'hint_prob': 0.95, 
+        {'start': 0, 'type': 'stable', 
+         'hint_prob': 0.55, 'reward_prob': 0.9, 
+         'reversals': [60]},
+        
+        {'start': 120, 'type': 'volatile', 
+         'hint_prob': 0.95, 'reward_prob': 0.65,
          'reversals': [128, 136, 144, 152, 160, 168, 176, 184]},
-        {'start': 200, 'type': 'stable', 'hint_prob': 0.55, 'reversals': [260]},
-        {'start': 320, 'type': 'volatile', 'hint_prob': 0.95, 
+        
+        {'start': 200, 'type': 'stable', 
+         'hint_prob': 0.55, 'reward_prob': 0.9,
+         'reversals': [260]},
+        
+        {'start': 320, 'type': 'volatile', 
+         'hint_prob': 0.95, 'reward_prob': 0.65,
          'reversals': [328, 336, 344, 352, 360, 368, 376, 384]},
     ]
 
@@ -157,8 +185,7 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
             np.random.seed(seed)
             
             env = RegimeDependentBandit(
-                regime_schedule=regime_schedule,
-                probability_reward=PROBABILITY_REWARD
+                regime_schedule=regime_schedule
             )
             
             runner = AgentRunnerWithLL(A, B, D, value_fn,
@@ -245,7 +272,7 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
         bounds.append((0.0, 6.0))    # phi_reward (prefer non-negative)
     # Xi bounds (action preferences - hint, left, right for each profile)
     for k in range(K):
-        bounds.append((-2.0, 0.0))  # hint bias: force negative to discourage hints
+        bounds.append((-2.0, 3.0))  # hint bias: NOW can be positive!
         bounds.append((-1.5, 1.5))  # left bias
         bounds.append((-1.5, 1.5))  # right bias
     # Z bounds (assignment logits)
@@ -273,13 +300,14 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
         workers=num_workers,  # All cores minus 1
         updating='deferred',  # Parallel-friendly update strategy
         seed=seed,
-        disp=True
+        disp=True,
+        polish=False # Skip polishing to save time
     )
     
     print(f"\nOptimization complete!")
     print(f"Best objective value: {result.fun:.4f}")
-    print(f"  (Note: objective = -accuracy - 0.1*choice_ratio + 0.01*mean_ll, lower is better)")
-    print(f"  This prioritizes: 1) accuracy, 2) making choices, 3) reasonable LL")
+    print(f"  (Note: objective = -total_rewards + 0.01*(-mean_ll), lower is better)")
+    print(f"  This prioritizes: 1) total rewards earned, 2) reasonable LL")
     
     # Extract best parameters
     best_params = result.x
@@ -323,17 +351,18 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
                             num_actions_per_factor=num_actions_per_factor)
     
     total_ll = 0.0
-    total_acc = 0.0
+    total_rewards = 0.0
     total_choice_ratio = 0.0
     stable_hint_usage = []
     volatile_hint_usage = []
+    stable_rewards = []
+    volatile_rewards = []
     
     for run in tqdm(range(num_runs), desc=f"Evaluating K={K}"):
         np.random.seed(seed + run)
         
         env = RegimeDependentBandit(
-            regime_schedule=regime_schedule,
-            probability_reward=PROBABILITY_REWARD
+            regime_schedule=regime_schedule
         )
         
         runner = AgentRunnerWithLL(A, B, D, value_fn,
@@ -342,7 +371,7 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
                             reward_mod_idx=1)
         
         actions = []
-        contexts = []
+        rewards = []
         regimes = []
         lls = []
         
@@ -352,24 +381,21 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
             action, qs, q_pi, efe, gamma, ll = runner.step_with_ll(obs_ids, t)
             
             actions.append(action)
-            contexts.append(env.bandit.context)
             regimes.append(env.current_regime or 'stable')
             lls.append(ll)
             total_ll += ll
             
             obs = env.step(action)
+            
+            # Track rewards
+            reward = 1 if obs[1] == 'observe_reward' else 0
+            rewards.append(reward)
         
-        # Compute accuracy and choice ratio
+        # Compute metrics
+        total_rewards += sum(rewards)
+        
         choices = [a for a in actions if a in ['act_left', 'act_right']]
-        if len(choices) > 0:
-            correct = sum(1 for a, c in zip(actions, contexts) if
-                         (a == 'act_left' and c == 'left_better') or
-                         (a == 'act_right' and c == 'right_better'))
-            total_acc += correct / len(choices)
-            total_choice_ratio += len(choices) / len(actions)
-        else:
-            total_acc += 0.0
-            total_choice_ratio += 0.0
+        total_choice_ratio += len(choices) / len(actions)
         
         # Hint usage by regime
         stable_hints = sum(1 for a, r in zip(actions, regimes) if a == 'act_hint' and r == 'stable')
@@ -379,17 +405,26 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
         
         stable_hint_usage.append(stable_hints / stable_trials if stable_trials > 0 else 0)
         volatile_hint_usage.append(volatile_hints / volatile_trials if volatile_trials > 0 else 0)
+        
+        # Rewards by regime
+        stable_reward_total = sum(r for r, reg in zip(rewards, regimes) if reg == 'stable')
+        volatile_reward_total = sum(r for r, reg in zip(rewards, regimes) if reg == 'volatile')
+        stable_rewards.append(stable_reward_total / stable_trials if stable_trials > 0 else 0)
+        volatile_rewards.append(volatile_reward_total / volatile_trials if volatile_trials > 0 else 0)
     
     mean_ll = total_ll / (num_runs * num_trials)
-    mean_acc = total_acc / num_runs
+    mean_rewards = total_rewards / num_runs
     mean_choice_ratio = total_choice_ratio / num_runs
     
     print(f"\nK={K} Final Results:")
     print(f"  Mean LL: {mean_ll:.2f}")
-    print(f"  Mean Accuracy: {mean_acc:.3f}")
+    print(f"  Total Rewards: {mean_rewards:.1f} / {num_trials} trials")
+    print(f"  Reward Rate: {mean_rewards/num_trials:.3f}")
     print(f"  Choice Ratio: {mean_choice_ratio:.3f} (fraction of trials with left/right)")
     print(f"  Stable Hint Usage: {np.mean(stable_hint_usage):.3f} ± {np.std(stable_hint_usage):.3f}")
     print(f"  Volatile Hint Usage: {np.mean(volatile_hint_usage):.3f} ± {np.std(volatile_hint_usage):.3f}")
+    print(f"  Stable Reward Rate: {np.mean(stable_rewards):.3f} ± {np.std(stable_rewards):.3f}")
+    print(f"  Volatile Reward Rate: {np.mean(volatile_rewards):.3f} ± {np.std(volatile_rewards):.3f}")
     print(f"  Optimized profiles:")
     for k, prof in enumerate(profiles):
         xi = prof['xi_logits']
@@ -400,10 +435,13 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
     
     return {
         'll': mean_ll,
-        'accuracy': mean_acc,
+        'total_rewards': mean_rewards,
+        'reward_rate': mean_rewards / num_trials,
         'choice_ratio': mean_choice_ratio,
         'stable_hints': np.mean(stable_hint_usage),
-        'volatile_hints': np.mean(volatile_hint_usage)
+        'volatile_hints': np.mean(volatile_hint_usage),
+        'stable_reward_rate': np.mean(stable_rewards),
+        'volatile_reward_rate': np.mean(volatile_rewards)
     }
 
 
@@ -413,9 +451,19 @@ def main():
     print("="*70)
     print("K-SWEEP OPTIMIZATION: VARIABLE VOLATILITY TASK")
     print("="*70)
-    print("Task: Regime-dependent hint reliability")
-    print("  Stable: 55% hint accuracy")
-    print("  Volatile: 95% hint accuracy")
+    print("Task: Regime-dependent TRADE-OFFS between exploration and exploitation")
+    print()
+    print("  STABLE regime (exploitation-favored):")
+    print("    - Hint accuracy: 55% (barely useful)")
+    print("    - Reward probability: 90% (easy to learn from feedback)")
+    print("    - Reversals: Rare (every 60 trials)")
+    print("    → Optimal: Ignore hints, exploit learned preferences")
+    print()
+    print("  VOLATILE regime (exploration-favored):")
+    print("    - Hint accuracy: 95% (very reliable)")
+    print("    - Reward probability: 65% (noisy feedback)")
+    print("    - Reversals: Frequent (every 8 trials)")
+    print("    → Optimal: Use hints to track rapid changes")
     print()
     
     # Build generative model
@@ -446,12 +494,21 @@ def main():
     print("\n" + "="*70)
     print("COMPARISON ACROSS K")
     print("="*70)
-    print(f"{'K':<5} {'LL':<10} {'Accuracy':<12} {'Choice%':<10} {'Stable Hints':<15} {'Volatile Hints':<15}")
+    print(f"{'K':<5} {'LL':<10} {'Rewards':<12} {'Rate':<10} {'Stable Hints':<15} {'Volatile Hints':<15}")
     print("-"*70)
     for K in [1, 2, 3]:
         r = results[K]
-        choice_pct = r['choice_ratio'] * 100
-        print(f"{K:<5} {r['ll']:<10.2f} {r['accuracy']:<12.3f} {choice_pct:<10.1f} {r['stable_hints']:<15.3f} {r['volatile_hints']:<15.3f}")
+        print(f"{K:<5} {r['ll']:<10.2f} {r['total_rewards']:<12.1f} {r['reward_rate']:<10.3f} "
+              f"{r['stable_hints']:<15.3f} {r['volatile_hints']:<15.3f}")
+    
+    print("\n" + "="*70)
+    print("REGIME-SPECIFIC PERFORMANCE")
+    print("="*70)
+    print(f"{'K':<5} {'Stable Reward Rate':<20} {'Volatile Reward Rate':<20}")
+    print("-"*70)
+    for K in [1, 2, 3]:
+        r = results[K]
+        print(f"{K:<5} {r['stable_reward_rate']:<20.3f} {r['volatile_reward_rate']:<20.3f}")
     
     print("\n" + "="*70)
     print("EXPERIMENT COMPLETE")
