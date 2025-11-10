@@ -1,0 +1,76 @@
+(.venv) C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles>python src/experiments/sanity_check_profiles.py
+======================================================================
+SANITY CHECK: Hand-crafted K=2 vs Optimized K=1
+======================================================================
+
+
+======================================================================
+Evaluating: K=1 Optimized (Same profile for both regimes)
+======================================================================
+K=1 Optimized (Same profile for both regimes): 100%|██████████████████████████████████████████| 20/20 [01:07<00:00,  3.38s/it] 
+
+Results:
+  Mean LL: -0.80
+  Total Rewards: 248.7 / 400 trials
+  Reward Rate: 0.622
+  Stable Hint Usage: 0.109 ± 0.034
+  Volatile Hint Usage: 0.316 ± 0.032
+  Stable Reward Rate: 0.774 ± 0.045
+  Volatile Reward Rate: 0.393 ± 0.034
+
+======================================================================
+Evaluating: K=2 Hand-crafted (Regime-specific profiles)
+======================================================================
+K=2 Hand-crafted (Regime-specific profiles): 100%|████████████████████████████████████████████| 20/20 [01:07<00:00,  3.38s/it] 
+
+Results:
+  Mean LL: -0.19
+  Total Rewards: 297.8 / 400 trials
+  Reward Rate: 0.745
+  Stable Hint Usage: 0.000 ± 0.000
+  Volatile Hint Usage: 0.000 ± 0.000
+  Stable Reward Rate: 0.878 ± 0.019
+  Volatile Reward Rate: 0.544 ± 0.050
+
+======================================================================
+Evaluating: K=2 Extreme (Maximally differentiated profiles)
+======================================================================
+K=2 Extreme (Maximally differentiated profiles): 100%|████████████████████████████████████████| 20/20 [01:08<00:00,  3.44s/it] 
+
+Results:
+  Mean LL: -0.20
+  Total Rewards: 211.4 / 400 trials
+  Reward Rate: 0.529
+  Stable Hint Usage: 0.000 ± 0.000
+  Volatile Hint Usage: 1.000 ± 0.000
+  Stable Reward Rate: 0.881 ± 0.020
+  Volatile Reward Rate: 0.000 ± 0.000
+
+======================================================================
+COMPARISON
+======================================================================
+Model                                              Rewards      Stable Hints    Volatile Hints
+----------------------------------------------------------------------
+K=1 Optimized                                      248.7        0.109           0.316
+K=2 Hand-crafted                                   297.8        0.000           0.000
+K=2 Extreme                                        211.4        0.000           1.000
+
+======================================================================
+REGIME-SPECIFIC REWARD RATES
+======================================================================
+Model                                              Stable          Volatile
+----------------------------------------------------------------------
+K=1 Optimized                                      0.774           0.393
+K=2 Hand-crafted                                   0.878           0.544
+K=2 Extreme                                        0.881           0.000
+
+======================================================================
+INTERPRETATION
+======================================================================
+✅ Hand-crafted K=2 BEATS K=1 by 49.1 rewards!
+   → Regime-specific profiles DO help when properly designed
+   → Optimizer should be able to find this (or better)
+
+======================================================================
+
+(.venv) C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles>
