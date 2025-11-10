@@ -81,7 +81,7 @@ def params_to_profiles_and_Z(params, K):
     - xi: 3K params (3 action preferences per profile: hint, left, right)
     - Z: 2(K-1) params (assignment matrix logits)
     
-    Total: K + 2K + 3K + 2(K-1) = 6K - 2 for K>1, or 6K for K=1
+    Total: K + 2K + 3K + 2(K-1) = 8K - 2 for K>1, or 6K for K=1
     """
     
     # Unpack parameters
@@ -182,21 +182,28 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                 obs = env.step(action)
         
         mean_ll = total_ll / (num_runs * num_trials)
-        accuracy = total_correct / max(total_actions, 1)  # Avoid division by zero
+        
+        # Check for degenerate solutions (agent never chooses left/right)
+        if total_actions == 0:
+            # Severe penalty for never making actual choices
+            return 1e6
+        
+        accuracy = total_correct / total_actions
         
         # Multi-objective: minimize combined score
         # Since differential_evolution MINIMIZES, we want:
         # - Better LL (less negative) → lower objective
         # - Higher accuracy → lower objective
         #
-        # Strategy: Make both terms negative, more negative = better
-        # - Use mean_ll directly (it's already negative)
-        # - Subtract weighted accuracy (so high accuracy makes objective more negative)
+        # To achieve this, we negate mean_ll (which is negative) and subtract accuracy:
+        # - Negate mean_ll: better LL (-1.0) → +1.0, worse LL (-5.0) → +5.0
+        # - Subtract 10*accuracy: high acc (0.8) → -8.0, low acc (0.3) → -3.0
         #
-        # Example: LL=-1.0, acc=0.8 → obj = -1.0 - 8.0 = -9.0 (good, very negative)
-        #          LL=-1.0, acc=0.1 → obj = -1.0 - 1.0 = -2.0 (bad, less negative)
-        #          LL=-5.0, acc=0.8 → obj = -5.0 - 8.0 = -13.0 (best)
-        objective = mean_ll - 10.0 * accuracy
+        # Examples:
+        #   Good LL + high acc: -(-1.0) - 10*0.8 = 1.0 - 8.0 = -7.0 (low, preferred)
+        #   Bad LL + high acc:  -(-5.0) - 10*0.8 = 5.0 - 8.0 = -3.0 (higher)
+        #   Good LL + low acc:  -(-1.0) - 10*0.3 = 1.0 - 3.0 = -2.0 (highest)
+        objective = -mean_ll - 10.0 * accuracy
         
         return objective
         
@@ -205,7 +212,7 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
         return 1e6
 
 
-def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter=30):
+def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter=15):
     """Optimize K profiles for variable volatility task."""
     
     print(f"\n{'='*70}")
@@ -269,8 +276,8 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
     )
     
     print(f"\nOptimization complete!")
-    print(f"Best negative LL: {result.fun:.4f}")
-    print(f"Best LL: {-result.fun:.4f}")
+    print(f"Best objective value: {result.fun:.4f}")
+    print(f"  (Note: objective = mean_ll - 10.0*accuracy, lower is better)")
     
     # Extract best parameters
     best_params = result.x
@@ -414,7 +421,7 @@ def main():
                                         num_trials=400, 
                                         num_runs=2,  # Reduced from 3 for speed
                                         seed=42,
-                                        maxiter=30)
+                                        maxiter=15)
         
         eval_result = evaluate_optimized_volatile(opt_result, A, B, D,
                                                   num_trials=400,
