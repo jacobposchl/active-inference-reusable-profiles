@@ -1,4 +1,4 @@
-(.venv) C:\Users\jakep\Desktop\reusable_profiles>python src\experiments\k_sweep_volatile.py
+(.venv) C:\Users\jakep\Desktop\reusable_profiles>python src/experiments/k_sweep_volatile.py
 ======================================================================
 K-SWEEP OPTIMIZATION: VARIABLE VOLATILITY TASK
 ======================================================================
@@ -6,13 +6,13 @@ Task: Regime-dependent TRADE-OFFS between exploration and exploitation
 
   STABLE regime (exploitation-favored):
     - Hint accuracy: 55% (barely useful)
-    - Reward probability: 90% (easy to learn from feedback)
+    - Reward probability: 85% (reliable feedback signal)
     - Reversals: Rare (every 60 trials)
     → Optimal: Ignore hints, exploit learned preferences
 
   VOLATILE regime (exploration-favored):
     - Hint accuracy: 95% (very reliable)
-    - Reward probability: 65% (noisy feedback)
+    - Reward probability: 50% (RANDOM - uninformative feedback)
     - Reversals: Frequent (every 8 trials)
     → Optimal: Use hints to track rapid changes
 
@@ -26,12 +26,12 @@ Running optimization with 3 runs per evaluation...
 
 Using 19 parallel workers (leaving 1 core free)
 
-differential_evolution step 1: f(x)= 0.0006890427049954497
-differential_evolution step 2: f(x)= 0.0006890427049954497
-differential_evolution step 3: f(x)= 0.0006890427049954497
+differential_evolution step 1: f(x)= -241.99538655791298
+differential_evolution step 2: f(x)= -241.99538655791298
+differential_evolution step 3: f(x)= -241.99538655791298
 
 Optimization complete!
-Best objective value: 0.0007
+Best objective value: -241.9954
   (Note: objective = -total_rewards + 0.01*(-mean_ll), lower is better)
   This prioritizes: 1) total rewards earned, 2) reasonable LL
 
@@ -39,16 +39,16 @@ Evaluating optimized K=1 model on variable volatility...
 Evaluating K=1: 100%|███████████████████████████████████████████████████| 20/20 [00:30<00:00,  1.51s/it] 
 
 K=1 Final Results:
-  Mean LL: -0.07
-  Total Rewards: 316.2 / 400 trials
-  Reward Rate: 0.791
-  Choice Ratio: 1.000 (fraction of trials with left/right)
-  Stable Hint Usage: 0.000 ± 0.000
-  Volatile Hint Usage: 0.000 ± 0.000
-  Stable Reward Rate: 0.795 ± 0.034
-  Volatile Reward Rate: 0.784 ± 0.005
+  Mean LL: -0.47
+  Total Rewards: 274.0 / 400 trials
+  Reward Rate: 0.685
+  Choice Ratio: 0.995 (fraction of trials with left/right)
+  Stable Hint Usage: 0.001 ± 0.002
+  Volatile Hint Usage: 0.010 ± 0.007
+  Stable Reward Rate: 0.813 ± 0.022
+  Volatile Reward Rate: 0.493 ± 0.047
   Optimized profiles:
-    Profile 0: γ=7.95, φ=-4.68/5.36, ξ_hint=0.24, ξ_left=0.29, ξ_right=0.60
+    Profile 0: γ=5.86, φ=-10.85/3.38, ξ_hint=2.85, ξ_left=-0.67, ξ_right=-0.04
   Z matrix:
 [[1.]
  [1.]]
@@ -62,33 +62,33 @@ Running optimization with 3 runs per evaluation...
 
 Using 19 parallel workers (leaving 1 core free)
 
-differential_evolution step 1: f(x)= 0.0006350455028917062
-differential_evolution step 2: f(x)= 0.0006350455028917062
-differential_evolution step 3: f(x)= 0.00038493588436126986
+differential_evolution step 1: f(x)= -249.99581604754525
+differential_evolution step 2: f(x)= -249.99581604754525
+differential_evolution step 3: f(x)= -255.99354795595485
 
 Optimization complete!
-Best objective value: 0.0004
+Best objective value: -255.9935
   (Note: objective = -total_rewards + 0.01*(-mean_ll), lower is better)
   This prioritizes: 1) total rewards earned, 2) reasonable LL
 
 Evaluating optimized K=2 model on variable volatility...
-Evaluating K=2: 100%|███████████████████████████████████████████████████| 20/20 [00:32<00:00,  1.65s/it] 
+Evaluating K=2: 100%|███████████████████████████████████████████████████| 20/20 [00:30<00:00,  1.52s/it] 
 
 K=2 Final Results:
-  Mean LL: -0.04
-  Total Rewards: 317.4 / 400 trials
-  Reward Rate: 0.793
-  Choice Ratio: 1.000 (fraction of trials with left/right)
-  Stable Hint Usage: 0.000 ± 0.000
-  Volatile Hint Usage: 0.000 ± 0.000
-  Stable Reward Rate: 0.799 ± 0.034
-  Volatile Reward Rate: 0.785 ± 0.004
+  Mean LL: -0.65
+  Total Rewards: 272.4 / 400 trials
+  Reward Rate: 0.681
+  Choice Ratio: 0.998 (fraction of trials with left/right)
+  Stable Hint Usage: 0.002 ± 0.002
+  Volatile Hint Usage: 0.003 ± 0.003
+  Stable Reward Rate: 0.809 ± 0.024
+  Volatile Reward Rate: 0.489 ± 0.038
   Optimized profiles:
-    Profile 0: γ=7.28, φ=-3.90/4.16, ξ_hint=-0.12, ξ_left=-1.27, ξ_right=1.48
-    Profile 1: γ=7.74, φ=-11.37/4.30, ξ_hint=-1.03, ξ_left=1.03, ξ_right=-1.48
+    Profile 0: γ=1.54, φ=-3.02/4.93, ξ_hint=1.17, ξ_left=-0.38, ξ_right=-0.58
+    Profile 1: γ=7.63, φ=-5.79/0.23, ξ_hint=1.22, ξ_left=-1.13, ξ_right=-0.28
   Z matrix:
-[[0.06721655 0.93278345]
- [0.90902745 0.09097255]]
+[[0.80903855 0.19096145]
+ [0.55167194 0.44832806]]
 
 ======================================================================
 Optimizing K=3 profiles for VARIABLE VOLATILITY task
