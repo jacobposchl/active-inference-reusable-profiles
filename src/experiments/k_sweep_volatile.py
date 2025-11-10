@@ -80,49 +80,40 @@ class RegimeDependentBandit:
 
 def create_regime_schedule():
     """
-    Create regime schedule with COMPLEMENTARY trade-offs.
+    REVISED: Make regimes differ in INFORMATION SOURCE reliability
     
-    STABLE regime:
-    - High reward probability (0.9): Easy to learn from feedback alone
-    - Low hint accuracy (0.55): Hints barely better than chance
-    - Rare reversals: Can exploit learned preferences
-    - NO penalties: Free to explore and exploit
-    → OPTIMAL STRATEGY: Ignore hints, exploit directly
+    STABLE regime (feedback-based learning):
+    - Hint accuracy: 55% (useless)
+    - Reward probability: 85% (reliable feedback signal)
+    - Rare reversals: Learn from feedback
+    → OPTIMAL: Ignore hints, learn from reward feedback
     
-    VOLATILE regime:
-    - High hint accuracy (0.95): Hints very reliable
-    - Medium reward probability (0.65): Decent when correct
-    - EXTREME volatility: Reversals EVERY 2 TRIALS (impossible to track!)
-    - HARSH penalty for wrong choices: -5.0
-    → OPTIMAL STRATEGY: MUST use hints! Reversals too fast to learn.
-    
-    Key insight in volatile:
-    - Without hints: Active inference can't track reversals every 2 trials
-    - Expected: 50% accuracy → 0.5×0.65 + 0.5×(-5.0) = -2.175 per trial
-    - With hints: 95% accuracy → 0.95×0.65 + 0.05×(-5.0) = 0.3675 per trial
-    
-    Hints provide +2.54 reward per trial advantage!
+    VOLATILE regime (hint-based learning):
+    - Hint accuracy: 95% (very reliable)
+    - Reward probability: 0% (NO FEEDBACK - can't tell if choice was correct!)
+    - Frequent reversals: Can't learn from uninformative feedback
+    → OPTIMAL: Must use hints because feedback is useless
     """
     return [
         {'start': 0, 'type': 'stable', 
-         'hint_prob': 0.55, 'reward_prob': 0.9, 'penalty': 0,
+         'hint_prob': 0.55, 'reward_prob': 0.85, 
+         'penalty': -1.0,
          'reversals': [60]},
         
         {'start': 120, 'type': 'volatile', 
-         'hint_prob': 0.95, 'reward_prob': 0.65, 'penalty': -5.0,
-         'reversals': [122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148,
-                      150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176,
-                      178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198]},  # Every 2 trials!
+         'hint_prob': 0.95, 'reward_prob': 0.0,  # ← KEY CHANGE!
+         'penalty': -2.0,
+         'reversals': [128, 136, 144, 152, 160, 168, 176, 184]},
         
         {'start': 200, 'type': 'stable', 
-         'hint_prob': 0.55, 'reward_prob': 0.9, 'penalty': 0,
+         'hint_prob': 0.55, 'reward_prob': 0.85,
+         'penalty': -1.0,
          'reversals': [260]},
         
         {'start': 320, 'type': 'volatile', 
-         'hint_prob': 0.95, 'reward_prob': 0.65, 'penalty': -5.0,
-         'reversals': [322, 324, 326, 328, 330, 332, 334, 336, 338, 340, 342, 344, 346, 348,
-                      350, 352, 354, 356, 358, 360, 362, 364, 366, 368, 370, 372, 374, 376,
-                      378, 380, 382, 384, 386, 388, 390, 392, 394, 396, 398]},  # Every 2 trials!
+         'hint_prob': 0.95, 'reward_prob': 0.0,  # ← KEY CHANGE!
+         'penalty': -2.0,
+         'reversals': [328, 336, 344, 352, 360, 368, 376, 384]},
     ]
 
 
