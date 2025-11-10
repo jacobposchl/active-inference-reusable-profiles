@@ -307,14 +307,14 @@ def main():
         'xi_logits': [0.0, -2.0, 0.0, 0.0]  # NEGATIVE hint bias, neutral on arms
     }
     
-    # VOLATILE PROFILE: Use hints heavily
-    # - Moderate reward preference (harder to get rewards with 0.65 prob)
-    # - POSITIVE hint bias (hints are great at 0.95)
-    # - Lower precision (stay flexible during rapid changes)
+    # VOLATILE PROFILE: Use hints STRATEGICALLY (not exclusively!)
+    # - Strong reward preference (still need to get rewards!)
+    # - MODERATE hint bias (hints guide choices, but don't replace them)
+    # - Medium precision (balance exploration and exploitation)
     volatile_profile = {
-        'gamma': 4.0,  # Lower precision for flexibility
-        'phi_logits': [0.0, -3.0, 1.5],  # Moderate reward preference
-        'xi_logits': [0.0, 2.5, 0.0, 0.0]  # STRONG positive hint bias
+        'gamma': 5.0,  # Medium precision
+        'phi_logits': [0.0, -4.0, 2.0],  # Strong reward preference
+        'xi_logits': [0.0, 1.0, 0.0, 0.0]  # MODERATE hint bias (~40-50% hint usage)
     }
     
     # For K=2, we can use both profiles in each regime,
