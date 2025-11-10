@@ -125,16 +125,17 @@ def params_to_profiles_and_Z(params, K):
 def objective_function(params, K, A, B, D, policies, num_actions_per_factor, 
                       regime_schedule, num_trials, num_runs, seed_base):
     """
-    Objective: Maximize log-likelihood AND accuracy on variable volatility task.
+    Objective: Maximize CHOICE accuracy while discouraging hint-only solutions.
     
     Returns:
     --------
     objective : float
-        Combined score = -mean_ll - 10.0*accuracy
+        Combined score = -accuracy - 0.1*choice_ratio + 0.01*mean_ll
         (lower is better; optimizer minimizes this)
         
-    The weighting (10.0) means accuracy is 10x more important than LL,
-    preventing degenerate hint-only solutions.
+    Primary goal: maximize accuracy on left/right choices
+    Secondary goal: encourage actual choices (not just hints)
+    Tertiary goal: maintain reasonable log-likelihood
     """
     
     try:
@@ -148,7 +149,8 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
         
         total_ll = 0.0
         total_correct = 0
-        total_actions = 0
+        total_choices = 0  # left/right actions
+        total_trials = 0
         
         for run in range(num_runs):
             seed = seed_base + run
@@ -170,10 +172,11 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                 obs_ids = runner.obs_labels_to_ids(obs)
                 action, qs, q_pi, efe, gamma, ll = runner.step_with_ll(obs_ids, t)
                 total_ll += ll
+                total_trials += 1
                 
                 # Track accuracy (only count left/right choices)
                 if action in ['act_left', 'act_right']:
-                    total_actions += 1
+                    total_choices += 1
                     context = env.bandit.context
                     if (action == 'act_left' and context == 'left_better') or \
                        (action == 'act_right' and context == 'right_better'):
@@ -181,29 +184,25 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                 
                 obs = env.step(action)
         
-        mean_ll = total_ll / (num_runs * num_trials)
+        mean_ll = total_ll / total_trials
         
-        # Check for degenerate solutions (agent never chooses left/right)
-        if total_actions == 0:
-            # Severe penalty for never making actual choices
+        # Penalize hint-only solutions severely
+        if total_choices == 0:
             return 1e6
         
-        accuracy = total_correct / total_actions
+        # Calculate metrics
+        accuracy = total_correct / total_choices
+        choice_ratio = total_choices / total_trials
         
-        # Multi-objective: minimize combined score
-        # Since differential_evolution MINIMIZES, we want:
-        # - Better LL (less negative) → lower objective
-        # - Higher accuracy → lower objective
-        #
-        # To achieve this, we negate mean_ll (which is negative) and subtract accuracy:
-        # - Negate mean_ll: better LL (-1.0) → +1.0, worse LL (-5.0) → +5.0
-        # - Subtract 10*accuracy: high acc (0.8) → -8.0, low acc (0.3) → -3.0
-        #
-        # Examples:
-        #   Good LL + high acc: -(-1.0) - 10*0.8 = 1.0 - 8.0 = -7.0 (low, preferred)
-        #   Bad LL + high acc:  -(-5.0) - 10*0.8 = 5.0 - 8.0 = -3.0 (higher)
-        #   Good LL + low acc:  -(-1.0) - 10*0.3 = 1.0 - 3.0 = -2.0 (highest)
-        objective = -mean_ll - 10.0 * accuracy
+        # Require minimum choice ratio (at least 30% of trials should be choices)
+        if choice_ratio < 0.3:
+            penalty = 100.0 * (0.3 - choice_ratio)
+            return 1e6 + penalty
+        
+        # Primary objective: maximize accuracy (negate because we minimize)
+        # Secondary: encourage more choices
+        # Tertiary: keep LL reasonable
+        objective = -accuracy - 0.1 * choice_ratio + 0.01 * (-mean_ll)
         
         return objective
         
@@ -245,8 +244,10 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
         bounds.append((-12.0, 0.0))  # phi_loss
         bounds.append((0.0, 6.0))    # phi_reward (prefer non-negative)
     # Xi bounds (action preferences - hint, left, right for each profile)
-    for _ in range(3*K):  # NOW 3 per profile instead of 1!
-        bounds.append((-3.0, 3.0))  # Tighter bounds to prevent extremes
+    for k in range(K):
+        bounds.append((-2.0, 0.0))  # hint bias: force negative to discourage hints
+        bounds.append((-1.5, 1.5))  # left bias
+        bounds.append((-1.5, 1.5))  # right bias
     # Z bounds (assignment logits)
     for _ in range(2*(K-1)) if K > 1 else []:
         bounds.append((-3.0, 3.0))
@@ -277,7 +278,8 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
     
     print(f"\nOptimization complete!")
     print(f"Best objective value: {result.fun:.4f}")
-    print(f"  (Note: objective = mean_ll - 10.0*accuracy, lower is better)")
+    print(f"  (Note: objective = -accuracy - 0.1*choice_ratio + 0.01*mean_ll, lower is better)")
+    print(f"  This prioritizes: 1) accuracy, 2) making choices, 3) reasonable LL")
     
     # Extract best parameters
     best_params = result.x
@@ -322,6 +324,7 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
     
     total_ll = 0.0
     total_acc = 0.0
+    total_choice_ratio = 0.0
     stable_hint_usage = []
     volatile_hint_usage = []
     
@@ -356,11 +359,17 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
             
             obs = env.step(action)
         
-        # Compute accuracy
-        correct = sum(1 for a, c in zip(actions, contexts) if
-                     (a == 'act_left' and c == 'left_better') or
-                     (a == 'act_right' and c == 'right_better'))
-        total_acc += correct / len(actions)
+        # Compute accuracy and choice ratio
+        choices = [a for a in actions if a in ['act_left', 'act_right']]
+        if len(choices) > 0:
+            correct = sum(1 for a, c in zip(actions, contexts) if
+                         (a == 'act_left' and c == 'left_better') or
+                         (a == 'act_right' and c == 'right_better'))
+            total_acc += correct / len(choices)
+            total_choice_ratio += len(choices) / len(actions)
+        else:
+            total_acc += 0.0
+            total_choice_ratio += 0.0
         
         # Hint usage by regime
         stable_hints = sum(1 for a, r in zip(actions, regimes) if a == 'act_hint' and r == 'stable')
@@ -373,10 +382,12 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
     
     mean_ll = total_ll / (num_runs * num_trials)
     mean_acc = total_acc / num_runs
+    mean_choice_ratio = total_choice_ratio / num_runs
     
     print(f"\nK={K} Final Results:")
     print(f"  Mean LL: {mean_ll:.2f}")
     print(f"  Mean Accuracy: {mean_acc:.3f}")
+    print(f"  Choice Ratio: {mean_choice_ratio:.3f} (fraction of trials with left/right)")
     print(f"  Stable Hint Usage: {np.mean(stable_hint_usage):.3f} ± {np.std(stable_hint_usage):.3f}")
     print(f"  Volatile Hint Usage: {np.mean(volatile_hint_usage):.3f} ± {np.std(volatile_hint_usage):.3f}")
     print(f"  Optimized profiles:")
@@ -390,6 +401,7 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
     return {
         'll': mean_ll,
         'accuracy': mean_acc,
+        'choice_ratio': mean_choice_ratio,
         'stable_hints': np.mean(stable_hint_usage),
         'volatile_hints': np.mean(volatile_hint_usage)
     }
@@ -434,11 +446,12 @@ def main():
     print("\n" + "="*70)
     print("COMPARISON ACROSS K")
     print("="*70)
-    print(f"{'K':<5} {'LL':<10} {'Accuracy':<12} {'Stable Hints':<15} {'Volatile Hints':<15}")
+    print(f"{'K':<5} {'LL':<10} {'Accuracy':<12} {'Choice%':<10} {'Stable Hints':<15} {'Volatile Hints':<15}")
     print("-"*70)
     for K in [1, 2, 3]:
         r = results[K]
-        print(f"{K:<5} {r['ll']:<10.2f} {r['accuracy']:<12.3f} {r['stable_hints']:<15.3f} {r['volatile_hints']:<15.3f}")
+        choice_pct = r['choice_ratio'] * 100
+        print(f"{K:<5} {r['ll']:<10.2f} {r['accuracy']:<12.3f} {choice_pct:<10.1f} {r['stable_hints']:<15.3f} {r['volatile_hints']:<15.3f}")
     
     print("\n" + "="*70)
     print("EXPERIMENT COMPLETE")
