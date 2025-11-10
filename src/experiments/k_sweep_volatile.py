@@ -13,6 +13,7 @@ import sys
 import os
 from scipy.optimize import differential_evolution
 from tqdm import tqdm
+import multiprocessing
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -23,7 +24,9 @@ from pymdp import utils
 
 
 class RegimeDependentBandit:
-    """Bandit with regime-dependent hint reliability."""
+    """
+    Bandit with regime-dependent hint reliability.
+    """
     
     def __init__(self, regime_schedule=None, **kwargs):
         from src.environment import TwoArmedBandit
@@ -70,12 +73,21 @@ def create_regime_schedule():
 
 
 def params_to_profiles_and_Z(params, K):
-    """Convert flat parameter vector to profiles and Z matrix."""
+    """Convert flat parameter vector to profiles and Z matrix.
+    
+    Parameter layout:
+    - gamma: K params (policy precision per profile)
+    - phi: 2K params (2 outcome preferences per profile: loss, reward)
+    - xi: 3K params (3 action preferences per profile: hint, left, right)
+    - Z: 2(K-1) params (assignment matrix logits)
+    
+    Total: K + 2K + 3K + 2(K-1) = 6K - 2 for K>1, or 6K for K=1
+    """
     
     # Unpack parameters
     gamma_params = params[0:K]
     phi_params = params[K:3*K]
-    xi_params = params[3*K:4*K]
+    xi_params = params[3*K:6*K]  # NOW 3 per profile!
     
     # Build profiles
     profiles = []
@@ -83,7 +95,10 @@ def params_to_profiles_and_Z(params, K):
         profile = {
             'gamma': float(gamma_params[k]),
             'phi_logits': [0.0, float(phi_params[2*k]), float(phi_params[2*k+1])],
-            'xi_logits': [0.0, float(xi_params[k]), 0.0, 0.0]
+            'xi_logits': [0.0, 
+                         float(xi_params[3*k]),      # hint bias
+                         float(xi_params[3*k + 1]),  # left bias
+                         float(xi_params[3*k + 2])]  # right bias
         }
         profiles.append(profile)
     
@@ -91,7 +106,7 @@ def params_to_profiles_and_Z(params, K):
     if K == 1:
         Z = np.ones((2, 1))
     else:
-        Z_raw = params[4*K:4*K+2*(K-1)]
+        Z_raw = params[6*K:6*K+2*(K-1)]  # Adjusted offset
         Z = np.zeros((2, K))
         
         # Row 0: left_better context
@@ -109,7 +124,18 @@ def params_to_profiles_and_Z(params, K):
 
 def objective_function(params, K, A, B, D, policies, num_actions_per_factor, 
                       regime_schedule, num_trials, num_runs, seed_base):
-    """Objective: Maximize log-likelihood on variable volatility task."""
+    """
+    Objective: Maximize log-likelihood AND accuracy on variable volatility task.
+    
+    Returns:
+    --------
+    objective : float
+        Combined score = -mean_ll - 10.0*accuracy
+        (lower is better; optimizer minimizes this)
+        
+    The weighting (10.0) means accuracy is 10x more important than LL,
+    preventing degenerate hint-only solutions.
+    """
     
     try:
         profiles, Z = params_to_profiles_and_Z(params, K)
@@ -121,6 +147,8 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                                 num_actions_per_factor=num_actions_per_factor)
         
         total_ll = 0.0
+        total_correct = 0
+        total_actions = 0
         
         for run in range(num_runs):
             seed = seed_base + run
@@ -142,10 +170,35 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                 obs_ids = runner.obs_labels_to_ids(obs)
                 action, qs, q_pi, efe, gamma, ll = runner.step_with_ll(obs_ids, t)
                 total_ll += ll
+                
+                # Track accuracy (only count left/right choices)
+                if action in ['act_left', 'act_right']:
+                    total_actions += 1
+                    context = env.bandit.context
+                    if (action == 'act_left' and context == 'left_better') or \
+                       (action == 'act_right' and context == 'right_better'):
+                        total_correct += 1
+                
                 obs = env.step(action)
         
         mean_ll = total_ll / (num_runs * num_trials)
-        return -mean_ll  # Minimize negative LL
+        accuracy = total_correct / max(total_actions, 1)  # Avoid division by zero
+        
+        # Multi-objective: minimize combined score
+        # Since differential_evolution MINIMIZES, we want:
+        # - Better LL (less negative) → lower objective
+        # - Higher accuracy → lower objective
+        #
+        # Strategy: Make both terms negative, more negative = better
+        # - Use mean_ll directly (it's already negative)
+        # - Subtract weighted accuracy (so high accuracy makes objective more negative)
+        #
+        # Example: LL=-1.0, acc=0.8 → obj = -1.0 - 8.0 = -9.0 (good, very negative)
+        #          LL=-1.0, acc=0.1 → obj = -1.0 - 1.0 = -2.0 (bad, less negative)
+        #          LL=-5.0, acc=0.8 → obj = -5.0 - 8.0 = -13.0 (best)
+        objective = mean_ll - 10.0 * accuracy
+        
+        return objective
         
     except Exception as e:
         print(f"Error in objective: {e}")
@@ -172,18 +225,21 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
     regime_schedule = create_regime_schedule()
     
     # Parameter bounds
-    num_params = 4*K + 2*(K-1) if K > 1 else 4*K
+    num_params = 6*K + 2*(K-1) if K > 1 else 6*K  # Updated for 3*K xi params
     
     bounds = []
     # Gamma bounds (policy precision)
     for _ in range(K):
         bounds.append((0.2, 8.0))
     # Phi bounds (outcome preferences)
-    for _ in range(2*K):
-        bounds.append((-12.0, 6.0))
-    # Xi bounds (action preferences - hint seeking)
+    # For each profile: [phi_loss, phi_reward]
+    # Force phi_reward to be non-negative so the agent values reward over null/loss
     for _ in range(K):
-        bounds.append((-5.0, 5.0))
+        bounds.append((-12.0, 0.0))  # phi_loss
+        bounds.append((0.0, 6.0))    # phi_reward (prefer non-negative)
+    # Xi bounds (action preferences - hint, left, right for each profile)
+    for _ in range(3*K):  # NOW 3 per profile instead of 1!
+        bounds.append((-3.0, 3.0))  # Tighter bounds to prevent extremes
     # Z bounds (assignment logits)
     for _ in range(2*(K-1)) if K > 1 else []:
         bounds.append((-3.0, 3.0))
@@ -193,6 +249,11 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
     print(f"Running optimization with {num_runs} runs per evaluation...")
     print()
     
+    # Use all cores except 1 (leave one free for other tasks)
+    num_workers = max(1, multiprocessing.cpu_count() - 1)
+    print(f"Using {num_workers} parallel workers (leaving 1 core free)")
+    print()
+    
     # Run optimization
     result = differential_evolution(
         objective_function,
@@ -200,9 +261,9 @@ def optimize_K_volatile(K, A, B, D, num_trials=400, num_runs=3, seed=42, maxiter
         args=(K, A, B, D, policies, num_actions_per_factor, 
               regime_schedule, num_trials, num_runs, seed),
         maxiter=maxiter,
-        popsize=15,
-        workers=-1,
-        updating='deferred',
+        popsize=10,  # Reduced from 15 for speed (still good coverage)
+        workers=num_workers,  # All cores minus 1
+        updating='deferred',  # Parallel-friendly update strategy
         seed=seed,
         disp=True
     )
@@ -313,7 +374,9 @@ def evaluate_optimized_volatile(opt_result, A, B, D, num_trials=400, num_runs=10
     print(f"  Volatile Hint Usage: {np.mean(volatile_hint_usage):.3f} ± {np.std(volatile_hint_usage):.3f}")
     print(f"  Optimized profiles:")
     for k, prof in enumerate(profiles):
-        print(f"    Profile {k}: γ={prof['gamma']:.2f}, φ={prof['phi_logits'][1]:.2f}/{prof['phi_logits'][2]:.2f}, ξ={prof['xi_logits'][1]:.2f}")
+        xi = prof['xi_logits']
+        print(f"    Profile {k}: γ={prof['gamma']:.2f}, φ={prof['phi_logits'][1]:.2f}/{prof['phi_logits'][2]:.2f}, "
+              f"ξ_hint={xi[1]:.2f}, ξ_left={xi[2]:.2f}, ξ_right={xi[3]:.2f}")
     print(f"  Z matrix:")
     print(Z)
     
@@ -349,7 +412,7 @@ def main():
     for K in [1, 2, 3]:
         opt_result = optimize_K_volatile(K, A, B, D, 
                                         num_trials=400, 
-                                        num_runs=3, 
+                                        num_runs=2,  # Reduced from 3 for speed
                                         seed=42,
                                         maxiter=30)
         
