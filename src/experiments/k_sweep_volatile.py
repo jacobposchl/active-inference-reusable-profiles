@@ -48,7 +48,7 @@ class RegimeDependentBandit:
         return current
     
     def step(self, action):
-        """Override step to use regime-dependent parameters."""
+        """Override step to use regime-dependent parameters and apply penalties."""
         regime = self.get_current_regime()
         if regime:
             # Update regime-specific parameters
@@ -62,7 +62,20 @@ class RegimeDependentBandit:
                     self.bandit.context = ('right_better' if self.bandit.context == 'left_better' 
                                           else 'left_better')
         
-        return self.bandit.step(action)
+        # Take the step
+        obs = self.bandit.step(action)
+        
+        # Apply penalty for wrong choices in volatile regime
+        if regime and regime.get('penalty', 0) != 0:
+            # If action was a choice (left=1 or right=2), check if it was wrong
+            if action in [1, 2]:
+                # Check reward observation (modality 1, outcome 0=loss, 1=reward)
+                if obs[1] == 0:  # Got loss (wrong choice)
+                    # Apply penalty by modifying the reward observation
+                    # We'll track this separately for objective function
+                    pass  # Penalty handled in objective function
+        
+        return obs
 
 
 def create_regime_schedule():
@@ -73,30 +86,43 @@ def create_regime_schedule():
     - High reward probability (0.9): Easy to learn from feedback alone
     - Low hint accuracy (0.55): Hints barely better than chance
     - Rare reversals: Can exploit learned preferences
+    - NO penalties: Free to explore and exploit
     → OPTIMAL STRATEGY: Ignore hints, exploit directly
     
     VOLATILE regime:
-    - Low reward probability (0.65): Noisy feedback, hard to learn
     - High hint accuracy (0.95): Hints very reliable
-    - Frequent reversals: Need to track rapid changes
-    → OPTIMAL STRATEGY: Use hints to guide choices
+    - Medium reward probability (0.65): Decent when correct
+    - EXTREME volatility: Reversals EVERY 2 TRIALS (impossible to track!)
+    - HARSH penalty for wrong choices: -5.0
+    → OPTIMAL STRATEGY: MUST use hints! Reversals too fast to learn.
+    
+    Key insight in volatile:
+    - Without hints: Active inference can't track reversals every 2 trials
+    - Expected: 50% accuracy → 0.5×0.65 + 0.5×(-5.0) = -2.175 per trial
+    - With hints: 95% accuracy → 0.95×0.65 + 0.05×(-5.0) = 0.3675 per trial
+    
+    Hints provide +2.54 reward per trial advantage!
     """
     return [
         {'start': 0, 'type': 'stable', 
-         'hint_prob': 0.55, 'reward_prob': 0.9, 
+         'hint_prob': 0.55, 'reward_prob': 0.9, 'penalty': 0,
          'reversals': [60]},
         
         {'start': 120, 'type': 'volatile', 
-         'hint_prob': 0.95, 'reward_prob': 0.65,
-         'reversals': [128, 136, 144, 152, 160, 168, 176, 184]},
+         'hint_prob': 0.95, 'reward_prob': 0.65, 'penalty': -5.0,
+         'reversals': [122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148,
+                      150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176,
+                      178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198]},  # Every 2 trials!
         
         {'start': 200, 'type': 'stable', 
-         'hint_prob': 0.55, 'reward_prob': 0.9,
+         'hint_prob': 0.55, 'reward_prob': 0.9, 'penalty': 0,
          'reversals': [260]},
         
         {'start': 320, 'type': 'volatile', 
-         'hint_prob': 0.95, 'reward_prob': 0.65,
-         'reversals': [328, 336, 344, 352, 360, 368, 376, 384]},
+         'hint_prob': 0.95, 'reward_prob': 0.65, 'penalty': -5.0,
+         'reversals': [322, 324, 326, 328, 330, 332, 334, 336, 338, 340, 342, 344, 346, 348,
+                      350, 352, 354, 356, 358, 360, 362, 364, 366, 368, 370, 372, 374, 376,
+                      378, 380, 382, 384, 386, 388, 390, 392, 394, 396, 398]},  # Every 2 trials!
     ]
 
 
@@ -176,7 +202,7 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                                 num_actions_per_factor=num_actions_per_factor)
         
         total_ll = 0.0
-        total_correct = 0
+        total_rewards = 0  # Track cumulative rewards (including penalties)
         total_choices = 0  # left/right actions
         total_trials = 0
         
@@ -201,15 +227,23 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
                 total_ll += ll
                 total_trials += 1
                 
-                # Track accuracy (only count left/right choices)
+                # Track choices and rewards
                 if action in ['act_left', 'act_right']:
                     total_choices += 1
-                    context = env.bandit.context
-                    if (action == 'act_left' and context == 'left_better') or \
-                       (action == 'act_right' and context == 'right_better'):
-                        total_correct += 1
                 
+                # Take action and get observation
                 obs = env.step(action)
+                
+                # Track rewards (with penalties in volatile regime)
+                regime = env.get_current_regime()
+                if obs[1] == 1:  # Reward outcome
+                    total_rewards += 1
+                elif obs[1] == 0 and action in ['act_left', 'act_right']:  # Loss from choice
+                    # Apply penalty if in penalty regime
+                    if regime and regime.get('penalty', 0) != 0:
+                        total_rewards += regime['penalty']  # penalty is negative, e.g., -5.0
+                    else:
+                        total_rewards -= 1  # Standard loss
         
         mean_ll = total_ll / total_trials
         
@@ -218,7 +252,6 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
             return 1e6
         
         # Calculate metrics
-        accuracy = total_correct / total_choices
         choice_ratio = total_choices / total_trials
         
         # Require minimum choice ratio (at least 30% of trials should be choices)
@@ -226,10 +259,9 @@ def objective_function(params, K, A, B, D, policies, num_actions_per_factor,
             penalty = 100.0 * (0.3 - choice_ratio)
             return 1e6 + penalty
         
-        # Primary objective: maximize accuracy (negate because we minimize)
-        # Secondary: encourage more choices
-        # Tertiary: keep LL reasonable
-        objective = -accuracy - 0.1 * choice_ratio + 0.01 * (-mean_ll)
+        # Primary objective: maximize total rewards (negate because we minimize)
+        # Secondary: small LL regularization to avoid degenerate solutions
+        objective = -total_rewards + 0.01 * (-mean_ll)
         
         return objective
         
@@ -479,13 +511,13 @@ def main():
     for K in [1, 2, 3]:
         opt_result = optimize_K_volatile(K, A, B, D, 
                                         num_trials=400, 
-                                        num_runs=2,  # Reduced from 3 for speed
+                                        num_runs=3,  # Quick optimization
                                         seed=42,
-                                        maxiter=15)
+                                        maxiter=3)  # Reduced for quick test
         
         eval_result = evaluate_optimized_volatile(opt_result, A, B, D,
                                                   num_trials=400,
-                                                  num_runs=10,
+                                                  num_runs=20,  # Full evaluation
                                                   seed=100)
         
         results[K] = {**opt_result, **eval_result}
