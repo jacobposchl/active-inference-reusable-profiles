@@ -3,6 +3,10 @@ import matplotlib.pyplot as plt
 import sys
 import os
 import json
+import math
+import csv
+from statistics import mean
+import logging
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -297,6 +301,144 @@ def main(use_multiprocessing=True, n_workers=None):
 
     print(f'Saved figure: {fig_png} and {fig_pdf}')
     print(f'Saved numeric results: {out_npz} and {out_json}')
+
+    # ----------------------------
+    # Publication-ready summary
+    # ----------------------------
+    # Compute 95% confidence intervals and effect sizes (Cohen's d vs K=1)
+    # Try to use scipy.stats.t for accurate t critical values; fall back to z=1.96
+    try:
+        from scipy import stats
+        def t_critical(df):
+            return float(stats.t.ppf(0.975, df))
+    except Exception:
+        logging.info('scipy not available; using z=1.96 for 95%% CI')
+        def t_critical(df):
+            return 1.96
+
+    def pooled_sd(sd1, sd2, n1, n2):
+        denom = (n1 + n2 - 2)
+        if denom <= 0:
+            return None
+        pooled = math.sqrt(((n1 - 1) * (sd1 ** 2) + (n2 - 1) * (sd2 ** 2)) / denom)
+        return pooled
+
+    # Build publication table rows
+    pub_rows = []
+    baseline_label = 'K=1' if 'K=1' in labels else labels[0]
+    baseline_idx = labels.index(baseline_label)
+    n = int(num_runs)
+
+    for i, lab in enumerate(labels):
+        tr_mean = float(means[i])
+        tr_std = float(stds[i])
+        tr_se = tr_std / math.sqrt(n) if n > 0 else None
+        tr_t = t_critical(n - 1)
+        tr_ci_low = tr_mean - tr_t * tr_se if tr_se is not None else None
+        tr_ci_high = tr_mean + tr_t * tr_se if tr_se is not None else None
+
+        acc_mean = float(acc_means[i])
+        acc_std = float(acc_stds[i])
+        acc_se = acc_std / math.sqrt(n) if n > 0 else None
+        acc_t = t_critical(n - 1)
+        acc_ci_low = acc_mean - acc_t * acc_se if acc_se is not None else None
+        acc_ci_high = acc_mean + acc_t * acc_se if acc_se is not None else None
+
+        cho_mean = float(choice_acc_means[i])
+        cho_std = float(choice_acc_stds[i])
+        cho_se = cho_std / math.sqrt(n) if n > 0 else None
+        cho_t = t_critical(n - 1)
+        cho_ci_low = cho_mean - cho_t * cho_se if cho_se is not None else None
+        cho_ci_high = cho_mean + cho_t * cho_se if cho_se is not None else None
+
+        # Cohen's d vs baseline for each metric
+        try:
+            base_tr = float(means[baseline_idx])
+            base_tr_sd = float(stds[baseline_idx])
+            pooled_tr = pooled_sd(tr_std, base_tr_sd, n, n)
+            cohen_d_tr = (tr_mean - base_tr) / pooled_tr if pooled_tr and pooled_tr > 0 else None
+        except Exception:
+            cohen_d_tr = None
+
+        try:
+            base_acc = float(acc_means[baseline_idx])
+            base_acc_sd = float(acc_stds[baseline_idx])
+            pooled_acc = pooled_sd(acc_std, base_acc_sd, n, n)
+            cohen_d_acc = (acc_mean - base_acc) / pooled_acc if pooled_acc and pooled_acc > 0 else None
+        except Exception:
+            cohen_d_acc = None
+
+        try:
+            base_cho = float(choice_acc_means[baseline_idx])
+            base_cho_sd = float(choice_acc_stds[baseline_idx])
+            pooled_cho = pooled_sd(cho_std, base_cho_sd, n, n)
+            cohen_d_cho = (cho_mean - base_cho) / pooled_cho if pooled_cho and pooled_cho > 0 else None
+        except Exception:
+            cohen_d_cho = None
+
+        pub_rows.append({
+            'label': lab,
+            'N': n,
+            'total_reward_mean': tr_mean,
+            'total_reward_std': tr_std,
+            'total_reward_se': tr_se,
+            'total_reward_ci_low': tr_ci_low,
+            'total_reward_ci_high': tr_ci_high,
+            'total_reward_cohen_d_vs_K1': cohen_d_tr,
+            'accuracy_mean': acc_mean,
+            'accuracy_std': acc_std,
+            'accuracy_se': acc_se,
+            'accuracy_ci_low': acc_ci_low,
+            'accuracy_ci_high': acc_ci_high,
+            'accuracy_cohen_d_vs_K1': cohen_d_acc,
+            'choice_accuracy_mean': cho_mean,
+            'choice_accuracy_std': cho_std,
+            'choice_accuracy_se': cho_se,
+            'choice_accuracy_ci_low': cho_ci_low,
+            'choice_accuracy_ci_high': cho_ci_high,
+            'choice_accuracy_cohen_d_vs_K1': cohen_d_cho
+        })
+
+    # Save publication-ready CSV and JSON
+    pub_csv = data_dir / 'hard_soft_z_publication_summary.csv'
+    pub_json = data_dir / 'hard_soft_z_publication_summary.json'
+
+    # Write CSV
+    with open(pub_csv, 'w', encoding='utf8', newline='') as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(pub_rows[0].keys()))
+        writer.writeheader()
+        for r in pub_rows:
+            writer.writerow(r)
+
+    # Write JSON
+    with open(pub_json, 'w', encoding='utf8') as fh:
+        json.dump(pub_rows, fh, indent=2)
+
+    # Nicely print the publication table to stdout
+    headers = ['label', 'N', 'total_reward_mean (95% CI)', 'total_reward_std', 'd_vs_K1', 'accuracy_mean (95% CI)', 'accuracy_std', 'd_vs_K1', 'choice_acc_mean (95% CI)', 'choice_acc_std', 'd_vs_K1']
+    print('\nPublication-ready summary (saved to:')
+    print(f'  {pub_csv}\n  {pub_json})\n')
+
+    def format_ci(mean_v, low_v, high_v, mean_fmt="{:.2f}", ci_fmt="{:.2f}"):
+        low_s = 'NA' if low_v is None else ci_fmt.format(low_v)
+        high_s = 'NA' if high_v is None else ci_fmt.format(high_v)
+        return f"{mean_fmt.format(mean_v)} [{low_s} , {high_s}]"
+
+    row_fmt = '{:<8} {:>3} {:>28} {:>12} {:>8} {:>22} {:>12} {:>8} {:>22} {:>12} {:>8}'
+    print(row_fmt.format(*headers))
+    for r in pub_rows:
+        tr_ci = format_ci(r['total_reward_mean'], r['total_reward_ci_low'], r['total_reward_ci_high'], "{:.2f}", "{:.2f}")
+        acc_ci = format_ci(r['accuracy_mean'], r['accuracy_ci_low'], r['accuracy_ci_high'], "{:.3f}", "{:.3f}")
+        cho_ci = format_ci(r['choice_accuracy_mean'], r['choice_accuracy_ci_low'], r['choice_accuracy_ci_high'], "{:.3f}", "{:.3f}")
+        d_tr = 'NA' if r['total_reward_cohen_d_vs_K1'] is None else f"{r['total_reward_cohen_d_vs_K1']:.2f}"
+        d_acc = 'NA' if r['accuracy_cohen_d_vs_K1'] is None else f"{r['accuracy_cohen_d_vs_K1']:.2f}"
+        d_cho = 'NA' if r['choice_accuracy_cohen_d_vs_K1'] is None else f"{r['choice_accuracy_cohen_d_vs_K1']:.2f}"
+        print(row_fmt.format(
+            r['label'], r['N'], tr_ci, f"{r['total_reward_std']:.2f}", d_tr,
+            acc_ci, f"{r['accuracy_std']:.3f}", d_acc,
+            cho_ci, f"{r['choice_accuracy_std']:.3f}", d_cho
+        ))
+
 
 
 if __name__ == '__main__':
