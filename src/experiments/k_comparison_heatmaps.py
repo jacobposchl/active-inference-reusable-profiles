@@ -2,13 +2,18 @@
 Grid experiment: Compare K=1 and K=2 across prob_reward and prob_hint
 Outputs: delta log likelihood, delta accuracy, delta BIC heatmaps
 """
-import numpy as np
-import sys
+
+import sys 
 import os
-import matplotlib.pyplot as plt
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import matplotlib.pyplot as plt
+
+# Add project root to path (two levels up from experiments)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from config.experiment_config import *
 from src.environment import TwoArmedBandit
