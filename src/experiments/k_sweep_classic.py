@@ -63,23 +63,29 @@ def generate_profile_sweep():
 
 def generate_K2_pairs():
     """
-    Generate K=2 profile pairs with CONTEXT-SPECIFIC SPECIALIZATION.
+    Generate K=2 profile pairs following the PAPER'S MECHANISM.
     
-    Core principle: Profiles should encode preferences aligned with different contexts.
-    The Z matrix allows the model to weight profiles based on beliefs about which
-    context is active (left_better vs right_better).
+    KEY INSIGHT:
+    Exploration emerges ENDOGENOUSLY from EFE when beliefs are uncertain,
+    NOT from switching to a low-precision "explore" profile.
     
-    Primary differentiation: Action preferences (xi_left, xi_right) that favor
-    the appropriate arm for each context.
+    The mechanism:
+    1. Two EXPLOIT profiles with OPPOSING action biases (ξ_left vs ξ_right)
+    2. SAME precision (γ) for both profiles
+    3. Hard assignment Z = [[1,0], [0,1]] routes profiles to contexts
     
-    Secondary variation: Policy precision (gamma) to test whether combining
-    arm specialization with exploration/exploitation helps.
+    When beliefs are CONFIDENT (q_t(L)=0.95):
+    - Mixed ξ_t ≈ +0.90 for left → EXPLOIT left arm
+    - EFE strongly favors the confident choice
     
-    Hypothesis: K=2 should beat K=1 because:
-    1. When beliefs say "left is better", left-specialist profile is weighted more
-    2. That profile already prefers the left arm (faster decisions, better coherence)
-    3. During uncertainty (around reversals), profiles mix smoothly
-    4. Better inference coherence (higher log-likelihood) than neutral K=1
+    When beliefs are UNCERTAIN (q_t(L)=0.5):
+    - Mixed ξ_t ≈ 0 (opposing biases cancel!)
+    - Reward-risk terms in G_t flatten
+    - Epistemic value of HINT becomes dominant
+    - Policy posterior shifts mass to hint → EXPLORE
+    
+    This is the paper's core contribution: exploration without an explicit
+    "explore" profile or state. The mixing does the work.
     
     Returns:
         List of (profile1, profile2, Z_matrix, description) tuples
@@ -87,9 +93,9 @@ def generate_K2_pairs():
     pairs = []
     
     # Define Z matrix configurations
-    Z_hard = np.array([[1.0, 0.0], [0.0, 1.0]])  # Hard assignment: strict specialization
-    Z_soft = np.array([[0.8, 0.2], [0.2, 0.8]])  # Soft assignment: mostly specialized
-    Z_balanced = np.array([[0.5, 0.5], [0.5, 0.5]])  # Balanced: always mix equally (control)
+    Z_hard = np.array([[1.0, 0.0], [0.0, 1.0]])  # Hard context routing (paper's approach)
+    Z_soft = np.array([[0.8, 0.2], [0.2, 0.8]])  # Soft context routing
+    Z_balanced = np.array([[0.5, 0.5], [0.5, 0.5]])  # Always balanced (control)
     
     Z_configs = [
         (Z_hard, "hard_assignment"),
@@ -98,88 +104,84 @@ def generate_K2_pairs():
     ]
     
     # ========================================================================
-    # ARM SPECIALISTS: Core test of context-specific preferences
+    # PAPER-ALIGNED CONFIGURATIONS: Opposing action biases, same gamma
     # ========================================================================
     
-    # Pair 1: Pure arm specialists (matched gamma, matched loss aversion)
-    # This is the CLEANEST test: only arm preference differs
-    profile_left_specialist = {
-        'gamma': 4.5,
-        'phi_logits': [0.0, -7.0, 7.0],
-        'xi_logits': [0.0, 0.0, 3.0, -3.0]  # [start, hint, LEFT+, right-]
-    }
-    profile_right_specialist = {
-        'gamma': 4.5,
-        'phi_logits': [0.0, -7.0, 7.0],
-        'xi_logits': [0.0, 0.0, -3.0, 3.0]  # [start, hint, left-, RIGHT+]
-    }
-    for Z, Z_name in Z_configs:
-        pairs.append((profile_left_specialist, profile_right_specialist, Z, 
-                     f"arm_specialists_balanced_{Z_name}"))
-    
-    # Pair 2: Arm specialists with different precision
-    # Tests whether arm specialization + precision variation helps
-    profile_left_exploit = {
-        'gamma': 7.0,  # High precision when confident left is better
-        'phi_logits': [0.0, -7.0, 7.0],
-        'xi_logits': [0.0, 0.0, 2.0, -2.0]  # Moderate left bias
-    }
-    profile_right_explore = {
-        'gamma': 2.0,  # Low precision when confident right is better
-        'phi_logits': [0.0, -7.0, 7.0],
-        'xi_logits': [0.0, 0.0, -2.0, 2.0]  # Moderate right bias
-    }
-    for Z, Z_name in Z_configs:
-        pairs.append((profile_left_exploit, profile_right_explore, Z,
-                     f"arm_specialists_precision_varied_{Z_name}"))
-    
-    # Pair 3: Arm specialists with different loss aversion
-    # Tests whether arm specialization + risk preferences helps
-    profile_left_cautious = {
-        'gamma': 4.5,
-        'phi_logits': [0.0, -10.0, 7.0],  # Very loss-averse
-        'xi_logits': [0.0, 0.0, 3.0, -3.0]  # Strong left bias
-    }
-    profile_right_bold = {
-        'gamma': 4.5,
-        'phi_logits': [0.0, -4.0, 7.0],  # Moderate loss aversion
-        'xi_logits': [0.0, 0.0, -3.0, 3.0]  # Strong right bias
-    }
-    for Z, Z_name in Z_configs:
-        pairs.append((profile_left_cautious, profile_right_bold, Z,
-                     f"arm_specialists_loss_varied_{Z_name}"))
-    
-    # Pair 4: Strong arm specialists (maximum differentiation)
-    # Tests whether stronger arm biases improve performance
+    # Pair 1: STRONG opposing biases (±2.0), moderate precision
+    # This matches the paper's toy example most closely
     profile_left_strong = {
-        'gamma': 5.0,
-        'phi_logits': [0.0, -7.0, 7.0],
-        'xi_logits': [0.0, 0.0, 5.0, -5.0]  # Very strong left bias
+        'gamma': 3.0,  # Same gamma for both (paper's approach)
+        'phi_logits': [0.0, -7.0, 7.0],  # Standard reward preference
+        'xi_logits': [0.0, 0.0, +2.0, -2.0]  # Strong left bias
     }
     profile_right_strong = {
-        'gamma': 5.0,
-        'phi_logits': [0.0, -7.0, 7.0],
-        'xi_logits': [0.0, 0.0, -5.0, 5.0]  # Very strong right bias
+        'gamma': 3.0,  # Same gamma (key!)
+        'phi_logits': [0.0, -7.0, 7.0],  # Same reward preference
+        'xi_logits': [0.0, 0.0, -2.0, +2.0]  # Strong right bias (opposes left)
     }
     for Z, Z_name in Z_configs:
         pairs.append((profile_left_strong, profile_right_strong, Z,
-                     f"arm_specialists_strong_{Z_name}"))
+                     f"paper_strong_bias_{Z_name}"))
     
-    # Pair 5: Combined variation (arm specialization + precision + loss aversion)
-    # Tests whether multiple dimensions of differentiation help
-    profile_left_combo = {
-        'gamma': 7.0,  # Exploitative
-        'phi_logits': [0.0, -10.0, 7.0],  # Very cautious
-        'xi_logits': [0.0, 0.0, 3.0, -3.0]  # Left specialist
+    # Pair 2: MODERATE opposing biases (±1.5), moderate precision
+    profile_left_moderate = {
+        'gamma': 3.0,
+        'phi_logits': [0.0, -7.0, 7.0],
+        'xi_logits': [0.0, 0.0, +1.5, -1.5]
     }
-    profile_right_combo = {
-        'gamma': 2.0,  # Exploratory
-        'phi_logits': [0.0, -4.0, 7.0],  # Bold
-        'xi_logits': [0.0, 0.0, -3.0, 3.0]  # Right specialist
+    profile_right_moderate = {
+        'gamma': 3.0,
+        'phi_logits': [0.0, -7.0, 7.0],
+        'xi_logits': [0.0, 0.0, -1.5, +1.5]
     }
     for Z, Z_name in Z_configs:
-        pairs.append((profile_left_combo, profile_right_combo, Z,
-                     f"arm_specialists_combined_{Z_name}"))
+        pairs.append((profile_left_moderate, profile_right_moderate, Z,
+                     f"paper_moderate_bias_{Z_name}"))
+    
+    # Pair 3: STRONG biases with higher precision
+    profile_left_high_gamma = {
+        'gamma': 5.0,
+        'phi_logits': [0.0, -7.0, 7.0],
+        'xi_logits': [0.0, 0.0, +2.0, -2.0]
+    }
+    profile_right_high_gamma = {
+        'gamma': 5.0,
+        'phi_logits': [0.0, -7.0, 7.0],
+        'xi_logits': [0.0, 0.0, -2.0, +2.0]
+    }
+    for Z, Z_name in Z_configs:
+        pairs.append((profile_left_high_gamma, profile_right_high_gamma, Z,
+                     f"paper_strong_high_gamma_{Z_name}"))
+    
+    # Pair 4: Test varying loss aversion alongside action biases
+    profile_left_cautious = {
+        'gamma': 3.0,
+        'phi_logits': [0.0, -10.0, 7.0],  # Very loss-averse
+        'xi_logits': [0.0, 0.0, +2.0, -2.0]
+    }
+    profile_right_cautious = {
+        'gamma': 3.0,
+        'phi_logits': [0.0, -10.0, 7.0],  # Same loss aversion
+        'xi_logits': [0.0, 0.0, -2.0, +2.0]
+    }
+    for Z, Z_name in Z_configs:
+        pairs.append((profile_left_cautious, profile_right_cautious, Z,
+                     f"paper_cautious_{Z_name}"))
+    
+    # Pair 5: Asymmetric loss aversion (test if it helps)
+    profile_left_bold = {
+        'gamma': 3.0,
+        'phi_logits': [0.0, -4.0, 7.0],  # Risk-tolerant
+        'xi_logits': [0.0, 0.0, +2.0, -2.0]
+    }
+    profile_right_cautious_asym = {
+        'gamma': 3.0,
+        'phi_logits': [0.0, -10.0, 7.0],  # Risk-averse
+        'xi_logits': [0.0, 0.0, -2.0, +2.0]
+    }
+    for Z, Z_name in Z_configs:
+        pairs.append((profile_left_bold, profile_right_cautious_asym, Z,
+                     f"paper_asymmetric_risk_{Z_name}"))
     
     return pairs
 
@@ -290,56 +292,74 @@ def describe_profile(profile):
     xi_left = profile['xi_logits'][2]
     xi_right = profile['xi_logits'][3]
     
-    # Describe gamma
-    if gamma < 3.5:
+    # Describe gamma (MOST IMPORTANT for new design)
+    if gamma < 3.0:
         gamma_desc = "exploratory"
-    elif gamma < 6.0:
+    elif gamma < 5.5:
         gamma_desc = "balanced"
     else:
         gamma_desc = "exploitative"
     
     # Describe loss aversion
     if phi_loss > -5.5:
-        loss_desc = "moderate_loss_aversion"
+        loss_desc = "moderate_risk"
     elif phi_loss > -8.5:
-        loss_desc = "strong_loss_aversion"
+        loss_desc = "cautious"
     else:
-        loss_desc = "very_strong_loss_aversion"
+        loss_desc = "very_cautious"
     
-    # Describe arm specialization (most important!)
-    if xi_left > 1.0 and xi_right < -1.0:
+    # Describe arm specialization
+    if abs(xi_left) < 0.1 and abs(xi_right) < 0.1:
+        arm_desc = "neutral"
+    elif abs(xi_left) < 1.0 and abs(xi_right) < 1.0:
+        if xi_left > 0:
+            arm_desc = "gentle_left"
+        else:
+            arm_desc = "gentle_right"
+    elif xi_left > 1.0 and xi_right < -1.0:
         arm_desc = "LEFT_specialist"
     elif xi_right > 1.0 and xi_left < -1.0:
         arm_desc = "RIGHT_specialist"
-    elif abs(xi_left) < 0.5 and abs(xi_right) < 0.5:
-        arm_desc = "neutral"
     else:
         arm_desc = f"custom(L={xi_left:.1f},R={xi_right:.1f})"
     
-    return f"{gamma_desc}_{loss_desc}_{arm_desc} (γ={gamma:.1f}, φ_loss={phi_loss:.1f}, ξ_L={xi_left:.1f}, ξ_R={xi_right:.1f})"
+    return f"{gamma_desc}_{loss_desc}_{arm_desc} (γ={gamma:.1f})"
 
 
 def main():
     """Main execution: systematic sweep through profile configurations."""
     
     print("=" * 70)
-    print("K-SWEEP: SYSTEMATIC PROFILE CONFIGURATION TESTING")
+    print("K-SWEEP: PAPER-ALIGNED PROFILE DIFFERENTIATION")
     print("Classic Two-Armed Bandit Task")
     print("=" * 70)
     print()
-    print("HYPOTHESIS: K>1 (multiple profiles) outperforms K=1 (single profile)")
-    print("because belief-weighted profile mixing enables context-specific")
-    print("adaptation that a single neutral profile cannot achieve.")
+    print("THEORETICAL FRAMEWORK (from paper §3.2-3.4):")
     print()
-    print("K=1: Profiles with NEUTRAL preferences (context-agnostic)")
-    print("     Like M1 model - must work equally for both contexts")
+    print("KEY MECHANISM: Exploration emerges ENDOGENOUSLY from EFE calculation")
+    print("when beliefs are uncertain, via opposing action biases and mixing.")
     print()
-    print("K=2: ARM-SPECIALIZED profile pairs (context-specific)")
-    print("     Left-specialist + Right-specialist")
-    print("     Z matrix routes based on beliefs about which arm is better")
+    print("Two EXPLOIT profiles with OPPOSING action biases:")
+    print("  Profile 1: Strong left preference (ξ_left = +2.0, ξ_right = -2.0)")
+    print("  Profile 2: Strong right preference (ξ_left = -2.0, ξ_right = +2.0)")
+    print("  Both use SAME precision γ (e.g., 3.0)")
     print()
-    print("K=3: Tests whether redundancy (more profiles than contexts)")
-    print("     gracefully handled or provides additional benefit")
+    print("Z matrix: Hard assignment [[1,0], [0,1]]")
+    print("  Routes profile 1 to 'left-better' context")
+    print("  Routes profile 2 to 'right-better' context")
+    print()
+    print("WHEN BELIEFS ARE CONFIDENT (q_t(L)=0.95):")
+    print("  → Mixed ξ_t ≈ +0.90 for left")
+    print("  → EXPLOIT: Agent strongly chooses left arm")
+    print()
+    print("WHEN BELIEFS ARE UNCERTAIN (q_t(L)=0.5):")
+    print("  → Mixed ξ_t ≈ 0 (opposing biases cancel!)")
+    print("  → Reward-risk terms in G_t flatten")
+    print("  → Epistemic value of HINT dominates")
+    print("  → EXPLORE: Agent seeks information via hint")
+    print()
+    print("HYPOTHESIS: Paper-aligned K=2 (opposing action biases, same γ)")
+    print("            beats K=1 via endogenous exploration-exploitation.")
     print()
     
     # Build generative model
@@ -357,14 +377,19 @@ def main():
     # Generate all profile configurations
     print("Generating profile configurations...")
     all_profiles = generate_profile_sweep()
-    print(f"Generated {len(all_profiles)} K=1 configurations (neutral, context-agnostic)")
+    print(f"Generated {len(all_profiles)} K=1 configurations (fixed precision, neutral actions)")
     
     k2_pairs = generate_K2_pairs()
-    print(f"Generated {len(k2_pairs)} K=2 configurations (arm-specialized pairs)")
+    print(f"Generated {len(k2_pairs)} K=2 configurations")
     print()
-    print("NOTE: K=2 profiles have arm-specific preferences (xi_left, xi_right)")
-    print("      while K=1 profiles are neutral (xi_left=0, xi_right=0)")
-    print("      This tests whether context-specialization beats neutrality.")
+    print("K=2 DESIGN (Paper-Aligned):")
+    print("  - Pairs 1-3: Strong/moderate/high-γ opposing action biases")
+    print("  - All pairs use SAME γ within each profile pair")
+    print("  - Tests hard/soft/balanced Z assignment matrices")
+    print("  - Exploration emerges via ξ cancellation when beliefs uncertain")
+    print()
+    print("This tests the paper's core mechanism: endogenous exploration")
+    print("via profile mixing, without explicit 'explore' profile or state.")
     print()
     
     # Storage for all results
@@ -636,16 +661,18 @@ def main():
     if improvement_k2_k1 > 0:
         print(f"✅ K=2 outperformed K=1 by {improvement_pct:.1f}% on average.")
         print()
-        print("This demonstrates that context-specific profile specialization")
-        print("(arm-specific action preferences) provides better inference coherence")
-        print("than a single neutral profile, validating the core claim that")
-        print("differentiation across contexts matters.")
+        print("This demonstrates that the paper's mechanism works:")
+        print("Opposing action biases + belief-based mixing creates endogenous")
+        print("exploration (via ξ cancellation) when uncertain and exploitation")
+        print("when confident, providing adaptive advantage over fixed profiles.")
     else:
         print(f"⚠️  K=1 outperformed K=2 by {abs(improvement_pct):.1f}%.")
         print()
-        print("This suggests that the task does not require context-specific")
-        print("specialization, or that profile mixing overhead outweighs benefits.")
-        print("Consider: Are arm biases too strong? Is Z assignment appropriate?")
+        print("Possible explanations:")
+        print("1. Action biases too strong → fight against EFE's epistemic term")
+        print("2. Action biases too weak → insufficient differentiation when confident")
+        print("3. Z assignment doesn't match belief dynamics")
+        print("4. Task may not benefit from context-specific action preferences")
     print()
 
 
