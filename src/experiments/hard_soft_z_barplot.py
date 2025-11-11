@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
+import json
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -220,24 +222,81 @@ def main(use_multiprocessing=True, n_workers=None):
     choice_acc_stds = [results[k][5] for k in labels]
 
     x = np.arange(len(labels))
-    width = 0.35
+    # Create a publication-ready grouped bar chart with error bars.
+    # Use a compact width and distinct colors for the three metrics.
+    width = 0.2
+    fig, ax1 = plt.subplots(figsize=(9, 5))
 
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    rects1 = ax1.bar(x - width/2, means, width, yerr=stds, label='Total Reward', capsize=5)
-    rects2 = ax1.bar(x + width/2, acc_means, width, yerr=acc_stds, label='Accuracy (all trials)', capsize=5)
-    # Optionally plot choice-only accuracy as a smaller overlay
-    rects3 = ax1.bar(x + width/2, choice_acc_means, width/4, yerr=choice_acc_stds, label='Accuracy (choice-only)', capsize=5,
-                     align='center')
+    colors = ['#4C72B0', '#55A868', '#C44E52']  # blue, green, red
+    pos1 = x - width
+    pos2 = x
+    pos3 = x + width
 
-    ax1.set_ylabel('Performance')
-    ax1.set_title('Ablation: Z-matrix Mixing (Profile Set C, prob_reward=0.65, prob_hint=0.65)')
+    bars1 = ax1.bar(pos1, means, width, yerr=stds, capsize=6, label='Total reward', color=colors[0], edgecolor='black', linewidth=0.5)
+    bars2 = ax1.bar(pos2, acc_means, width, yerr=acc_stds, capsize=6, label='Accuracy (all trials)', color=colors[1], edgecolor='black', linewidth=0.5)
+    bars3 = ax1.bar(pos3, choice_acc_means, width, yerr=choice_acc_stds, capsize=6, label='Accuracy (choice-only)', color=colors[2], edgecolor='black', linewidth=0.5)
+
+    # Axis labels and title
+    ax1.set_ylabel('Performance metric')
+    ax1.set_title('Ablation: Z-matrix mixing — Profile set C (P(reward)=0.65, P(hint)=0.65)', fontsize=12)
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+
+    # Improve legend and grid appearance
+    ax1.legend(frameon=False)
+    ax1.grid(axis='y', linestyle='--', alpha=0.4)
+
+    # Add numeric labels above bars for clarity
+    def autolabel(bars, fmt="{:.2f}"):
+        for bar in bars:
+            h = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., h + 0.02 * max(1.0, h), fmt.format(h), ha='center', va='bottom', fontsize=8)
+
+    autolabel(bars1, "{:.1f}")
+    autolabel(bars2, "{:.2f}")
+    autolabel(bars3, "{:.2f}")
 
     plt.tight_layout()
-    plt.show()
+
+    # Save figures to results/figures (relative to this script)
+    figures_dir = Path(os.path.join(os.path.dirname(__file__), '..', '..', 'results', 'figures'))
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    fig_png = figures_dir / 'hard_soft_z_barplot.png'
+    fig_pdf = figures_dir / 'hard_soft_z_barplot.pdf'
+    plt.savefig(fig_png, dpi=300, bbox_inches='tight')
+    plt.savefig(fig_pdf, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+    # Save numeric results to results/data as NPZ and JSON for reproducibility
+    data_dir = Path(os.path.join(os.path.dirname(__file__), '..', '..', 'results', 'data'))
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build structured numeric output
+    out_npz = data_dir / 'hard_soft_z_results.npz'
+    np.savez(out_npz,
+             labels=labels,
+             total_reward_means=np.array(means),
+             total_reward_stds=np.array(stds),
+             accuracy_means=np.array(acc_means),
+             accuracy_stds=np.array(acc_stds),
+             choice_accuracy_means=np.array(choice_acc_means),
+             choice_accuracy_stds=np.array(choice_acc_stds))
+
+    # Also create a human-readable JSON summary
+    out_json = data_dir / 'hard_soft_z_results.json'
+    json_summary = {label: {
+        'total_reward_mean': float(results[label][0]),
+        'total_reward_std': float(results[label][1]),
+        'accuracy_mean': float(results[label][2]),
+        'accuracy_std': float(results[label][3]),
+        'choice_accuracy_mean': float(results[label][4]),
+        'choice_accuracy_std': float(results[label][5])
+    } for label in labels}
+    with open(out_json, 'w', encoding='utf8') as fh:
+        json.dump(json_summary, fh, indent=2)
+
+    print(f'Saved figure: {fig_png} and {fig_pdf}')
+    print(f'Saved numeric results: {out_npz} and {out_json}')
 
 
 if __name__ == '__main__':
