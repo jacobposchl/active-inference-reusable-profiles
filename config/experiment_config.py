@@ -22,12 +22,12 @@ NUM_FACTORS = len(NUM_STATES)
 NUM_MODALITIES = len(NUM_OBS)
 
 # Environment parameters (generative process)
-PROBABILITY_HINT = 0.7 # percent chance of correct hint (which arm is better) --- this create observation noise
-PROBABILITY_REWARD = 0.8 # percent chance of reward when choosing better arm. --- this creates outcome noise
+PROBABILITY_HINT = 0.99 # percent chance of correct hint (which arm is better) --- this create observation noise
+PROBABILITY_REWARD = 0.85 # percent chance of reward when choosing better arm. --- this creates outcome noise
 
 # Default experiment parameters
-DEFAULT_TRIALS = 200
-DEFAULT_REVERSAL_SCHEDULE = [30, 60, 90, 120, 150, 180]
+DEFAULT_TRIALS = 800
+DEFAULT_REVERSAL_SCHEDULE = [i for i in range(40, 800, 40)]
 # probability of arm context flipping
 DEFAULT_CONTEXT_VOLATILITY = 0.05
 
