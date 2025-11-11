@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 import sys
 import os
 import json
@@ -227,7 +228,6 @@ def main(use_multiprocessing=True, n_workers=None):
 
     x = np.arange(len(labels))
     # Create a publication-ready grouped bar chart with error bars.
-    # Use a compact width and distinct colors for the three metrics.
     width = 0.2
     fig, ax1 = plt.subplots(figsize=(9, 5))
 
@@ -236,29 +236,75 @@ def main(use_multiprocessing=True, n_workers=None):
     pos2 = x
     pos3 = x + width
 
-    bars1 = ax1.bar(pos1, means, width, yerr=stds, capsize=6, label='Total reward', color=colors[0], edgecolor='black', linewidth=0.5)
-    bars2 = ax1.bar(pos2, acc_means, width, yerr=acc_stds, capsize=6, label='Accuracy (all trials)', color=colors[1], edgecolor='black', linewidth=0.5)
-    bars3 = ax1.bar(pos3, choice_acc_means, width, yerr=choice_acc_stds, capsize=6, label='Accuracy (choice-only)', color=colors[2], edgecolor='black', linewidth=0.5)
+    # Compute left axis limits - start at 0 so reward baseline aligns with x-axis
+    try:
+        reward_min = float(np.min(np.array(means) - np.array(stds)))
+        reward_max = float(np.max(np.array(means) + np.array(stds)))
+    except Exception:
+        reward_min, reward_max = float(min(means)), float(max(means))
+
+    rng = reward_max - reward_min if (reward_max - reward_min) > 0 else 1.0
+    margin = 0.15 * rng
+    lower = 0.0
+    upper = reward_max + margin
+    ax1.set_ylim(lower, upper)
+
+    # Plot total reward on the left y-axis (ax1)
+    bars1 = ax1.bar(pos1, means, width, yerr=stds, capsize=6, label='Total reward',
+                    color=colors[0], edgecolor='black', linewidth=0.5)
+
+    # Create a secondary y-axis for accuracy metrics
+    ax2 = ax1.twinx()
+
+    # Plot accuracy bars on ax2
+    bars2 = ax2.bar(pos2, acc_means, width, yerr=acc_stds, capsize=6,
+                    label='Accuracy (all trials)', color=colors[1],
+                    edgecolor='black', linewidth=0.5)
+    bars3 = ax2.bar(pos3, choice_acc_means, width, yerr=choice_acc_stds, capsize=6,
+                    label='Accuracy (choice-only)', color=colors[2],
+                    edgecolor='black', linewidth=0.5)
 
     # Axis labels and title
-    ax1.set_ylabel('Performance metric')
+    ax1.set_ylabel('Total reward')
+    ax2.set_ylabel('Accuracy')
     ax1.set_title('Ablation: Z-matrix mixing — Profile set C (P(reward)=0.65, P(hint)=0.65)', fontsize=12)
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels)
 
-    # Improve legend and grid appearance
-    ax1.legend(frameon=False)
+    # Improve legend and grid appearance. Combine legends from both axes.
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(handles1 + handles2, labels1 + labels2, frameon=False)
     ax1.grid(axis='y', linestyle='--', alpha=0.4)
 
     # Add numeric labels above bars for clarity
-    def autolabel(bars, fmt="{:.2f}"):
+    def autolabel(ax, bars, fmt="{:.2f}", pct=False):
+        ymin, ymax = ax.get_ylim()
+        y_range = ymax - ymin
+        offset = 0.02 * y_range
         for bar in bars:
             h = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., h + 0.02 * max(1.0, h), fmt.format(h), ha='center', va='bottom', fontsize=8)
+            y_pos = h + offset if h >= 0 else h - offset
+            if pct:
+                txt = f"{h:.0%}"
+            else:
+                txt = fmt.format(h)
+            va = 'bottom' if h >= 0 else 'top'
+            ax.text(bar.get_x() + bar.get_width()/2., y_pos, txt, ha='center', va=va, fontsize=8)
 
-    autolabel(bars1, "{:.1f}")
-    autolabel(bars2, "{:.2f}")
-    autolabel(bars3, "{:.2f}")
+    autolabel(ax1, bars1, "{:.1f}")
+    autolabel(ax2, bars2, pct=True)
+    autolabel(ax2, bars3, pct=True)
+
+    # Set accuracy axis range to 0..1 and format ticks as percentages for readability
+    ax2.set_ylim(0.0, 1.0)
+    ax2.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+    ax2.yaxis.set_major_locator(plt.MaxNLocator(6))
+
+    # Move the x-axis (bottom spine) to the data coordinate y=0 if 0 is in range
+    if lower <= 0.0 <= upper:
+        ax1.spines['bottom'].set_position(('data', 0.0))
+        ax1.xaxis.set_ticks_position('bottom')
 
     plt.tight_layout()
 
