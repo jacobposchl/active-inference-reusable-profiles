@@ -1,0 +1,34 @@
+{
+  "K=1": {
+    "total_reward_mean": 0.1,
+    "total_reward_std": 0.30000000000000004,
+    "accuracy_mean": 0.000125,
+    "accuracy_std": 0.000375,
+    "choice_accuracy_mean": 0.1,
+    "choice_accuracy_std": 0.30000000000000004
+  },
+  "Hard": {
+    "total_reward_mean": 111.0,
+    "total_reward_std": 24.298148077579903,
+    "accuracy_mean": 0.6597500000000001,
+    "accuracy_std": 0.042066910987140486,
+    "choice_accuracy_mean": 0.7688289013152795,
+    "choice_accuracy_std": 0.04163143196863804
+  },
+  "Medium": {
+    "total_reward_mean": 112.8,
+    "total_reward_std": 11.93984924527944,
+    "accuracy_mean": 0.6303750000000001,
+    "accuracy_std": 0.013750568170079384,
+    "choice_accuracy_mean": 0.8080751970923636,
+    "choice_accuracy_std": 0.021084044967674315
+  },
+  "Soft": {
+    "total_reward_mean": 67.1,
+    "total_reward_std": 11.058480908334563,
+    "accuracy_mean": 0.361875,
+    "accuracy_std": 0.0228872917795007,
+    "choice_accuracy_mean": 0.8719253970494769,
+    "choice_accuracy_std": 0.045213206993307074
+  }
+}
