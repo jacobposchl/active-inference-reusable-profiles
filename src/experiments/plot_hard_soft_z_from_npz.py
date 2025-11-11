@@ -103,7 +103,8 @@ def plot(results, outdir: Path, dpi=300):
     ax1.set_xticklabels(labels)
     ax1.set_ylabel('Total reward', fontsize=10)
     ax2.set_ylabel('Accuracy', fontsize=10)
-    ax1.set_title('Ablation: Z-matrix mixing — Profile set C (P(reward)=0.65, P(hint)=0.65)', fontsize=11)
+    # Cleaner, shorter title for publication
+    ax1.set_title('Z Matrix Mixing Comparison', fontsize=11)
 
     # Combine legends and place outside the plot area (clean for publication)
     h1, l1 = ax1.get_legend_handles_labels()
@@ -128,18 +129,28 @@ def plot(results, outdir: Path, dpi=300):
     ax2.tick_params(axis='y', which='major', labelsize=9)
 
     # Helper: add numeric labels
-    def autolabel(ax, bars, fmt="{:.2f}", pct=False):
-        """Attach a text label above each bar in *bars*, formatted.
+    def autolabel(ax, bars, errors=None, fmt="{:.2f}", pct=False):
+        """Attach a text label above each bar in *bars*.
 
+        If `errors` is provided (iterable matching bars), labels are placed
+        above the top of the error bar (height + error) to avoid overlap.
         If pct=True, format as percent (no decimals). Otherwise use fmt.
         """
         ymin, ymax = ax.get_ylim()
         y_range = ymax - ymin
         offset = 0.02 * y_range
 
-        for bar in bars:
+        for i, bar in enumerate(bars):
             h = bar.get_height()
-            y_pos = h + offset
+            err = 0.0
+            if errors is not None:
+                try:
+                    err = float(np.asarray(errors)[i])
+                except Exception:
+                    err = 0.0
+
+            # Place label above the error bar if present
+            y_pos = h + err + offset
 
             if pct:
                 txt = f"{h:.0%}"
@@ -149,9 +160,10 @@ def plot(results, outdir: Path, dpi=300):
             ax.text(bar.get_x() + bar.get_width() / 2., y_pos, txt,
                     ha='center', va='bottom', fontsize=8)
 
-    autolabel(ax1, bars1, "{:.1f}")
-    autolabel(ax2, bars2, pct=True)
-    autolabel(ax2, bars3, pct=True)
+    # Place labels above error bars by passing the std arrays
+    autolabel(ax1, bars1, errors=stds, fmt="{:.1f}")
+    autolabel(ax2, bars2, errors=acc_stds, pct=True)
+    autolabel(ax2, bars3, errors=cho_stds, pct=True)
 
     plt.tight_layout()
 
