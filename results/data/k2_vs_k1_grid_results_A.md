@@ -1,0 +1,95 @@
+# Heatmap analysis — Case A
+
+File: `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\data\k2_vs_k1_grid_results_A.npz`
+
+## Contents
+
+Found keys: ['prob_rewards', 'prob_hints', 'll_k1', 'll_k2', 'acc_k1', 'acc_k2', 'bic_k1', 'bic_k2', 'll_delta', 'acc_delta', 'bic_delta']
+
+- `prob_rewards`: [0.65, 0.75, 0.85, 0.95]
+
+- `prob_hints`: [0.65, 0.75, 0.85, 0.95]
+
+- prob_rewards: dtype=float64, shape=(4,)
+  - min=0.65, mean=0.8, max=0.95, std=0.111803
+
+- prob_hints: dtype=float64, shape=(4,)
+  - min=0.65, mean=0.8, max=0.95, std=0.111803
+
+- ll_k1: dtype=float64, shape=(4, 4)
+  - min=-0.764873, mean=-0.340571, max=-0.114486, std=0.207756
+  - sample values:
+    [-0.5892865582906117, -0.6065826956300175, -0.6473709043411932, -0.7648729286546444]
+    [-0.3552649328687648, -0.3641952055725391, -0.38456849204518323, -0.4416836469158702]
+    [-0.190987177258991, -0.1950225766479536, -0.20395995005919876, -0.22852366352913145]
+    [-0.11448649190610602, -0.11597292673473049, -0.11909882925097526, -0.12725523786616466]
+
+- ll_k2: dtype=float64, shape=(4, 4)
+  - min=-0.253446, mean=-0.109024, max=-0.0226882, std=0.0635046
+  - sample values:
+    [-0.2534459100886223, -0.20123207552712236, -0.17525782892215327, -0.1652312084159929]
+    [-0.16695987620510505, -0.11809949532924188, -0.097728933169252, -0.09471056073270938]
+    [-0.05577872952861384, -0.060312615185628055, -0.06891524259532979, -0.10136609937387138]
+    [-0.07011386293079593, -0.054306354386511047, -0.038238315458847934, -0.022688232424527187]
+
+- acc_k1: dtype=float64, shape=(4, 4)
+  - min=0.7325, mean=0.862812, max=0.9315, std=0.0694719
+  - sample values:
+    [0.75925, 0.75925, 0.75925, 0.7325]
+    [0.856875, 0.856875, 0.856625, 0.856875]
+    [0.910375, 0.910375, 0.910375, 0.910375]
+    [0.9315, 0.9315, 0.9315, 0.9315]
+
+- acc_k2: dtype=float64, shape=(4, 4)
+  - min=0.590625, mean=0.821922, max=0.908125, std=0.0912046
+  - sample values:
+    [0.590625, 0.697125, 0.752, 0.78375]
+    [0.717375, 0.781625, 0.812125, 0.84975]
+    [0.8915, 0.882, 0.885375, 0.89575]
+    [0.908125, 0.898125, 0.89975, 0.90575]
+
+- bic_k1: dtype=float64, shape=(4, 4)
+  - min=1858.75, mean=5476.09, max=12264.9, std=3324.1
+  - sample values:
+    [9455.546523111774, 9732.284720542266, 10384.896059921077, 12264.928448936296]
+    [5711.2005163622225, 5854.084879622611, 6180.057463184918, 7093.899941115909]
+    [3082.756426605842, 3147.3228168292435, 3290.320791409166, 3683.340206928089]
+    [1858.7454609596823, 1882.5284182176738, 1932.54285847759, 2063.0453963206205]
+
+- bic_k2: dtype=float64, shape=(4, 4)
+  - min=425.922, mean=1807.3, max=4118.04, std=1016.07
+  - sample values:
+    [4118.04493916259, 3282.6235861785917, 2867.035640499086, 2706.6097124005205]
+    [2734.2683970263147, 1952.5023030125037, 1626.5733084526657, 1578.2793494679838]
+    [955.3700502024552, 1027.9122207146827, 1165.5542592699103, 1684.7679677265758]
+    [1184.7321846373686, 931.8120479288106, 674.7234250862008, 425.9220965370688]
+
+- ll_delta: dtype=float64, shape=(4, 4)
+  - min=0.0443726, mean=0.231547, max=0.599642, std=0.157024
+  - sample values:
+    [0.33584064820198944, 0.4053506201028952, 0.4721130754190399, 0.5996417202386515]
+    [0.18830505666365976, 0.2460957102432972, 0.2868395588759312, 0.3469730861831608]
+    [0.13520844773037716, 0.13470996146232556, 0.13504470746386898, 0.12715756415526008]
+    [0.044372628975310094, 0.06166657234821944, 0.08086051379212733, 0.10456700544163747]
+
+- acc_delta: dtype=float64, shape=(4, 4)
+  - min=-0.168625, mean=-0.0408906, max=0.05125, std=0.0504392
+  - sample values:
+    [-0.16862500000000002, -0.062124999999999986, -0.007249999999999979, 0.05124999999999991]
+    [-0.13950000000000007, -0.07525000000000004, -0.044499999999999984, -0.007125000000000048]
+    [-0.018875000000000086, -0.02837500000000004, -0.025000000000000022, -0.014624999999999999]
+    [-0.023375000000000035, -0.033375000000000044, -0.031749999999999945, -0.02574999999999994]
+
+- bic_delta: dtype=float64, shape=(4, 4)
+  - min=-9558.32, mean=-3668.8, max=-674.013, std=2512.39
+  - sample values:
+    [-5337.501583949184, -6449.661134363674, -7517.860419421991, -9558.318736535775]
+    [-2976.932119335908, -3901.582576610107, -4553.484154732252, -5515.620591647926]
+    [-2127.3863764033867, -2119.4105961145606, -2124.7665321392556, -1998.5722392015134]
+    [-674.0132763223137, -950.7163702888632, -1257.8194333913893, -1637.1232997835518]
+
+Saved annotated heatmap to `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\figures\k2_vs_k1_grid_results_A_ll_delta.png` and `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\figures\k2_vs_k1_grid_results_A_ll_delta.pdf`
+
+Saved annotated heatmap to `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\figures\k2_vs_k1_grid_results_A_acc_delta.png` and `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\figures\k2_vs_k1_grid_results_A_acc_delta.pdf`
+
+Saved annotated heatmap to `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\figures\k2_vs_k1_grid_results_A_bic_delta.png` and `C:\Users\Jacob Poschl\reusable profiles in active inference\active-inference-reusable-profiles\results\figures\k2_vs_k1_grid_results_A_bic_delta.pdf`

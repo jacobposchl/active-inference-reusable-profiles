@@ -39,10 +39,6 @@ results/data/*.pkl
 results/data/*.npy
 results/data/*.h5
 results/data/*.json
-results/figures/*.png
-results/figures/*.pdf
-results/figures/*.jpg
-results/figures/*.svg
 
 # Keep directory structure but ignore contents
 !results/data/.gitkeep
