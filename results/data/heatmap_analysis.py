@@ -261,6 +261,100 @@ def main(fnames: list[str] | None = None, out_dir: str | None = None):
 		except Exception as e:
 			print(f"Failed to analyze {f}: {e}")
 
+	# After processing individual files, compute averaged heatmaps across
+	# the provided NPZ files for the common delta arrays (if present in the
+	# set). This produces three extra figures titled "Averaged".
+	# Collect arrays per-key from the files we attempted to analyze.
+	collected = { 'll_delta': [], 'acc_delta': [], 'bic_delta': [] }
+	collected_shapes = {}
+	# Try to read prob_hints/prob_rewards from first available file
+	_global_prob_hints = None
+	_global_prob_rewards = None
+	for f in files:
+		try:
+			if not f.exists():
+				continue
+			npz = np.load(f, allow_pickle=True)
+			if _global_prob_hints is None and 'prob_hints' in npz.files:
+				_global_prob_hints = np.asarray(npz['prob_hints'])
+			if _global_prob_rewards is None and 'prob_rewards' in npz.files:
+				_global_prob_rewards = np.asarray(npz['prob_rewards'])
+			for key in list(collected.keys()):
+				if key in npz.files:
+					arr = np.asarray(npz[key], dtype=float)
+					collected[key].append(arr)
+					collected_shapes[key] = arr.shape
+		except Exception:
+			# skip files we can't open here
+				continue
+
+	# For each key, if we have at least one array, compute the mean across
+	# files and render an averaged figure.
+	for key, arrs in collected.items():
+		if not arrs:
+			continue
+		# Stack along a new axis and average
+		stack = np.stack(arrs, axis=0)
+		avg = np.nanmean(stack, axis=0)
+		# Plot using the same visual conventions as individual analyses
+		# (diverging colormap centered at zero)
+		finite_vals = avg[np.isfinite(avg)]
+		if finite_vals.size == 0:
+			vmin, vmax = -1.0, 1.0
+		else:
+			mx = float(np.nanmax(np.abs(finite_vals)))
+			if mx == 0:
+				mx = 1e-6
+			vmin, vmax = -mx, mx
+
+		fig, ax = plt.subplots(figsize=(6, 5))
+		im = ax.imshow(avg, cmap='RdBu_r', origin='lower', vmin=vmin, vmax=vmax, interpolation='nearest', aspect='auto')
+		# Title should explicitly say "Averaged" as requested
+		title_map = {
+			'll_delta': 'Δ Log Likelihood (K=2 − K=1)',
+			'acc_delta': 'Δ Accuracy (K=2 − K=1)',
+			'bic_delta': 'Δ BIC (K=2 − K=1)'
+		}
+		ax.set_title(f"{title_map.get(key, key)} — Averaged")
+		if _global_prob_hints is not None:
+			ax.set_xticks(range(len(_global_prob_hints)))
+			ax.set_xticklabels([f"{float(x):.2f}" for x in _global_prob_hints], rotation=45, ha='right')
+		else:
+			ax.set_xticks(range(avg.shape[1]))
+		if _global_prob_rewards is not None:
+			ax.set_yticks(range(len(_global_prob_rewards)))
+			ax.set_yticklabels([f"{float(x):.2f}" for x in _global_prob_rewards])
+		else:
+			ax.set_yticks(range(avg.shape[0]))
+		ax.set_xlabel('Probability of hint')
+		ax.set_ylabel('Probability of reward')
+		cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+		cbar.ax.set_ylabel(title_map.get(key, key), rotation=270, labelpad=12)
+		# Annotate small grids
+		if avg.shape[0] <= 12 and avg.shape[1] <= 12:
+			norm = plt.Normalize(vmin=vmin, vmax=vmax)
+			cmap_obj = plt.get_cmap('RdBu_r')
+			for (i, j), val in np.ndenumerate(avg):
+				if not np.isfinite(val):
+					txt = 'n/a'
+				else:
+					txt = f"{val:.2f}"
+				rgba = cmap_obj(norm(val)) if np.isfinite(val) else (1.0, 1.0, 1.0, 1.0)
+				r, g, b, _ = rgba
+				luminance = 0.299 * r + 0.587 * g + 0.114 * b
+				txt_color = 'white' if luminance < 0.5 else 'black'
+				ax.text(j, i, txt, ha='center', va='center', fontsize=8, color=txt_color)
+
+		fig_path_png = fig_dir / f"averaged_{key}.png"
+		fig_path_pdf = fig_dir / f"averaged_{key}.pdf"
+		plt.tight_layout()
+		plt.savefig(fig_path_png, dpi=300, bbox_inches='tight')
+		plt.savefig(fig_path_pdf, dpi=300, bbox_inches='tight')
+		plt.close(fig)
+		print(f"Saved averaged heatmap: {fig_path_png} and {fig_path_pdf}")
+		# Record in metas under a synthetic key
+		metas[f"averaged_{key}"] = {'figure_png': str(fig_path_png), 'figure_pdf': str(fig_path_pdf)}
+
 	# Save a small JSON index summarizing all analyzed files
 	index_path = DEFAULT_DATA_DIR / 'heatmap_analysis_index.json'
 	with open(index_path, 'w', encoding='utf8') as fh:
