@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from config.experiment_config import *
 from src.environment import TwoArmedBandit
 from src.models import build_A, build_B, build_D, make_value_fn, AgentRunnerWithLL, run_episode, run_episode_with_ll
-from src.utils import find_reversals, trial_accuracy
+from src.utils import find_reversals, trial_accuracy, bootstrap_ci
 from src.utils.plotting import plot_gamma_over_time, plot_entropy_over_time
 
 
@@ -63,7 +63,7 @@ def create_model(model_name, A, B, D):
     return value_fn
 
 
-def run_single_agent(model_name, A, B, D, num_trials, seed=None):
+def run_single_agent(model_name, A, B, D, num_trials, seed=None, reversal_schedule=None):
     """Run a single agent for one episode."""
     
     if seed is not None:
@@ -73,7 +73,7 @@ def run_single_agent(model_name, A, B, D, num_trials, seed=None):
     env = TwoArmedBandit(
         probability_hint=PROBABILITY_HINT,
         probability_reward=PROBABILITY_REWARD,
-        reversal_schedule=DEFAULT_REVERSAL_SCHEDULE
+        reversal_schedule=reversal_schedule if reversal_schedule is not None else DEFAULT_REVERSAL_SCHEDULE
     )
     
     # Create value function
@@ -106,10 +106,15 @@ def get_num_parameters(model_name):
         return 4
         
     elif model_name == 'M3':
-        # Profile 1: phi_logits (2 free), xi_logits (1 free, hint bias), gamma (1)
-        # Profile 2: phi_logits (2 free), xi_logits (1 free), gamma (1)
-        # Z matrix: 2x2 with row constraints, so 2 free parameters
-        return 10
+        # Careful count of free parameters for M3:
+        # For each profile:
+        #  - phi_logits: 3 outcome logits -> 2 free parameters (sum-to-1 via softmax)
+        #  - xi_logits: 4 action logits -> 3 free parameters
+        #  - gamma: 1 parameter
+        # For 2 profiles: (2 + 3 + 1) * 2 = 12
+        # Z matrix: 2x2 with each row summing to 1 -> 1 free param per row -> 2
+        # Total free parameters = 12 + 2 = 14
+        return 14
     
     return 0
 
@@ -174,7 +179,7 @@ def compute_metrics(logs):
     }
 
 
-def run_comparison(num_runs=10, num_trials=DEFAULT_TRIALS, seed=42):
+def run_comparison(num_runs=20, num_trials=DEFAULT_TRIALS, seed=42, reversal_interval=None):
     """Run comparison experiment across multiple runs."""
     
     print("="*70)
@@ -183,6 +188,10 @@ def run_comparison(num_runs=10, num_trials=DEFAULT_TRIALS, seed=42):
     print(f"Runs per model: {num_runs}")
     print(f"Trials per run: {num_trials}")
     print(f"Random seed: {seed}")
+    if reversal_interval is None:
+        print(f"Reversal schedule: default ({len(DEFAULT_REVERSAL_SCHEDULE)} reversals)")
+    else:
+        print(f"Reversal interval: every {reversal_interval} trials")
     print()
     
     # Build shared components
@@ -196,13 +205,19 @@ def run_comparison(num_runs=10, num_trials=DEFAULT_TRIALS, seed=42):
     models = ['M1', 'M2', 'M3']
     results = {model: [] for model in models}
     
+    # Build reversal schedule if provided
+    if reversal_interval is not None:
+        reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
+    else:
+        reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
+
     # Run experiments
     for model_name in models:
         print(f"Running {model_name}...")
         
         for run in tqdm(range(num_runs), desc=f"  {model_name}"):
             run_seed = seed + run if seed is not None else None
-            logs = run_single_agent(model_name, A, B, D, num_trials, seed=run_seed)
+            logs = run_single_agent(model_name, A, B, D, num_trials, seed=run_seed, reversal_schedule=reversal_schedule)
             metrics = compute_metrics(logs)
             results[model_name].append(metrics)
     
@@ -226,22 +241,31 @@ def run_comparison(num_runs=10, num_trials=DEFAULT_TRIALS, seed=42):
         mean_gamma = np.mean([r['gamma_mean'] for r in model_results])
         
         # Log-likelihood and model fit metrics
-        mean_ll = np.mean([r['log_likelihood'] for r in model_results])
-        std_ll = np.std([r['log_likelihood'] for r in model_results])
-        
-        n = model_results[0]['num_trials']  # Number of observations
-        mean_aic = 2 * k - 2 * mean_ll
-        mean_bic = k * np.log(n) - 2 * mean_ll
-        
-        print(f"\n{model_name}:")
-        print(f"  Parameters:     {k}")
-        print(f"  Accuracy:       {mean_acc:.3f} ± {std_acc:.3f}")
-        print(f"  Total Reward:   {mean_reward:.1f} ± {std_reward:.1f}")
-        print(f"  Adaptation:     {mean_adapt:.1f} trials")
-        print(f"  Mean γ:         {mean_gamma:.3f}")
-        print(f"  Log-Likelihood: {mean_ll:.2f} ± {std_ll:.2f}")
-        print(f"  AIC:            {mean_aic:.2f}")
-        print(f"  BIC:            {mean_bic:.2f}")
+    ll_vals = np.array([r['log_likelihood'] for r in model_results])
+    mean_ll = ll_vals.mean()
+    std_ll = ll_vals.std()
+    # 95% CI via bootstrap helper
+    _, ll_ci_lower, ll_ci_upper = bootstrap_ci(ll_vals, n_bootstrap=5000, ci=95)
+
+    n = model_results[0]['num_trials']  # Number of observations
+    # Compute per-run AIC/BIC then summarize
+    aic_per_run = 2 * k - 2 * ll_vals
+    bic_per_run = k * np.log(n) - 2 * ll_vals
+
+    mean_aic = aic_per_run.mean()
+    std_aic = aic_per_run.std()
+    mean_bic = bic_per_run.mean()
+    std_bic = bic_per_run.std()
+
+    print(f"\n{model_name}:")
+    print(f"  Parameters:     {k}")
+    print(f"  Accuracy:       {mean_acc:.3f} ± {std_acc:.3f}")
+    print(f"  Total Reward:   {mean_reward:.1f} ± {std_reward:.1f}")
+    print(f"  Adaptation:     {mean_adapt:.1f} trials")
+    print(f"  Mean γ:         {mean_gamma:.3f}")
+    print(f"  Log-Likelihood: {mean_ll:.2f} ± {std_ll:.2f}  (95% CI: [{ll_ci_lower:.2f}, {ll_ci_upper:.2f}])")
+    print(f"  AIC:            {mean_aic:.2f} ± {std_aic:.2f}")
+    print(f"  BIC:            {mean_bic:.2f} ± {std_bic:.2f}")
     
     # Model comparison
     print("\n" + "="*70)
@@ -282,12 +306,12 @@ def run_comparison(num_runs=10, num_trials=DEFAULT_TRIALS, seed=42):
         print(f"  {model}: {delta:+.2f}")
     
     # Plot comparison
-    plot_model_comparison(results, num_trials)
+    plot_model_comparison(results, num_trials, reversal_interval=reversal_interval)
     
     return results
 
 
-def plot_model_comparison(results, num_trials):
+def plot_model_comparison(results, num_trials, reversal_interval=None):
     """Generate comparison plots."""
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -321,7 +345,7 @@ def plot_model_comparison(results, num_trials):
     # Plot 2: Accuracy distribution
     ax = axes[0, 1]
     acc_data = [[r['mean_accuracy'] for r in results[m]] for m in models]
-    bp = ax.boxplot(acc_data, labels=models, patch_artist=True)
+    bp = ax.boxplot(acc_data, tick_labels=models, patch_artist=True)
     for patch, model in zip(bp['boxes'], models):
         patch.set_facecolor(colors[model])
         patch.set_alpha(0.6)
@@ -332,7 +356,7 @@ def plot_model_comparison(results, num_trials):
     # Plot 3: Total rewards
     ax = axes[1, 0]
     reward_data = [[r['total_reward'] for r in results[m]] for m in models]
-    bp = ax.boxplot(reward_data, labels=models, patch_artist=True)
+    bp = ax.boxplot(reward_data, tick_labels=models, patch_artist=True)
     for patch, model in zip(bp['boxes'], models):
         patch.set_facecolor(colors[model])
         patch.set_alpha(0.6)
@@ -355,19 +379,30 @@ def plot_model_comparison(results, num_trials):
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('results/figures/model_comparison.png', dpi=FIG_DPI, bbox_inches='tight')
-    print(f"\nPlot saved: results/figures/model_comparison.png")
+    if reversal_interval is None:
+        outpath = 'results/figures/model_comparison.png'
+    else:
+        outpath = f'results/figures/model_comparison_interval_{reversal_interval}.png'
+    plt.savefig(outpath, dpi=FIG_DPI, bbox_inches='tight')
+    print(f"\nPlot saved: {outpath}")
     plt.show()
 
 
 def main():
     """Main entry point."""
     
-    # Run comparison with default settings
-    results = run_comparison(num_runs=10, num_trials=DEFAULT_TRIALS, seed=42)
+    # Run comparison across several reversal-interval settings
+    reversal_intervals = [40, 80, 160, 320]
+    all_results = {}
+    for interval in reversal_intervals:
+        print("\n" + "#"*70)
+        print(f"Running experiment with reversal interval = {interval}")
+        print("#"*70 + "\n")
+        results = run_comparison(num_runs=20, num_trials=DEFAULT_TRIALS, seed=42, reversal_interval=interval)
+        all_results[interval] = results
     
     print("\n" + "="*70)
-    print("EXPERIMENT COMPLETE")
+    print("ALL EXPERIMENTS COMPLETE")
     print("="*70)
 
 

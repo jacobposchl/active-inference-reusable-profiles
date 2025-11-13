@@ -22,7 +22,7 @@ NUM_FACTORS = len(NUM_STATES)
 NUM_MODALITIES = len(NUM_OBS)
 
 # Environment parameters (generative process)
-PROBABILITY_HINT = 0.99 # percent chance of correct hint (which arm is better) --- this create observation noise
+PROBABILITY_HINT = 0.85 # percent chance of correct hint (which arm is better) --- this create observation noise
 PROBABILITY_REWARD = 0.85 # percent chance of reward when choosing better arm. --- this creates outcome noise
 
 # Default experiment parameters
@@ -40,14 +40,14 @@ FIG_DPI = 300
 # Model default parameters
 M1_DEFAULTS = {
     # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-    'C_reward_logits': [0.0, -4.0, 2.0],
-    'gamma': 1.2
+    'C_reward_logits': [0.0, -5.0, 5.0],
+    'gamma': 2.5
 }
 
 M2_DEFAULTS = {
     # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-    'C_reward_logits': [0.0, -4.0, 2.0],
-    'gamma_base': 1.6,
+    'C_reward_logits': [0.0, -5.0, 5.0],
+    'gamma_base': 2.5,
     'entropy_k': 1.0
 }
 
@@ -56,17 +56,17 @@ M3_DEFAULTS = {
         {   
             # PROFILE 0: For left_better context - exploitative
             # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-            'phi_logits': [0.0, -4.0, 2.5], # Strong outcome preferences
+            'phi_logits': [0.0, -5.0, 5.0], # Strong outcome preferences
             # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
-            'xi_logits': [0.0, 0.0, 0.0, 0.0], # Neutral on actions
+            'xi_logits': [0.0, 1.0, 4.0, -4.0], # Neutral on actions
             'gamma': 2.5 # Moderate-high precision
         },
         {
             # PROFILE 1: For right_better context - exploitative
             # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-            'phi_logits': [0.0, -4.0, 2.5], # Strong outcome preferences
+            'phi_logits': [0.0, -5.0, 5.0], # Strong outcome preferences
             # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
-            'xi_logits': [0.0, 0.0, 0.0, 0.0], # Neutral on actions
+            'xi_logits': [0.0, 1.0, -4.0, 4.0], # Neutral on actions
             'gamma': 2.5 # Moderate-high precision
         }
     ],
