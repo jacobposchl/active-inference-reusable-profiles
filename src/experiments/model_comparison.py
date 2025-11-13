@@ -9,6 +9,7 @@ import sys
 import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import csv
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -307,6 +308,34 @@ def run_comparison(num_runs=20, num_trials=DEFAULT_TRIALS, seed=42, reversal_int
     
     # Plot comparison
     plot_model_comparison(results, num_trials, reversal_interval=reversal_interval)
+
+    # Save per-run metrics to CSV for this interval
+    csv_dir = os.path.join('results', 'csv')
+    os.makedirs(csv_dir, exist_ok=True)
+    if reversal_interval is None:
+        csv_path = os.path.join(csv_dir, f'model_comparison_default.csv')
+    else:
+        csv_path = os.path.join(csv_dir, f'model_comparison_interval_{reversal_interval}.csv')
+
+    # Prepare header and rows
+    header = ['interval', 'model', 'run_idx', 'parameters', 'mean_accuracy', 'total_reward', 'adaptation_time', 'mean_gamma', 'log_likelihood', 'aic', 'bic']
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for model_name in models:
+            model_results = results[model_name]
+            k = get_num_parameters(model_name)
+            n = model_results[0]['num_trials']
+            for run_idx, r in enumerate(model_results):
+                ll_i = r['log_likelihood']
+                aic_i = 2 * k - 2 * ll_i
+                bic_i = k * np.log(n) - 2 * ll_i
+                writer.writerow([reversal_interval if reversal_interval is not None else 'default',
+                                 model_name, run_idx, k,
+                                 r['mean_accuracy'], r['total_reward'], r['adaptation_time'], r['gamma_mean'],
+                                 ll_i, aic_i, bic_i])
+
+    print(f"Per-run CSV saved: {csv_path}")
     
     return results
 
@@ -392,7 +421,7 @@ def main():
     """Main entry point."""
     
     # Run comparison across several reversal-interval settings
-    reversal_intervals = [40, 80, 160, 320]
+    reversal_intervals = [40, 80, 160]
     all_results = {}
     for interval in reversal_intervals:
         print("\n" + "#"*70)
