@@ -7,7 +7,6 @@ how M1/M2/M3 behave around reversal points.
 Produces figures:
 - accuracy_around_reversal.png: accuracy aligned to reversal (pooled across runs and reversals) for all models
 - gamma_around_reversal.png: policy precision (gamma) aligned to reversals for all models
-- m3_profiles_around_reversal.png: M3 profile weights aligned to reversals (for each profile)
 
 Usage:
     python src\experiments\mechanistic_analysis.py
@@ -101,6 +100,82 @@ def plot_accuracy_around_reversals(results_by_model, pre=10, post=20, outpath=No
     plt.close()
 
 
+def plot_m3_profile_weights_by_direction(results_m3, pre=10, post=20, outpath=None):
+    """
+    Plot M3 profile weights aligned to reversals separately for reversals that switch
+    to `left_better` vs `right_better` (i.e., direction-specific alignment).
+
+    This avoids averaging windows from both reversal directions which can mask
+    direction-specific effects in profile weights.
+    """
+    Z = np.array(M3_DEFAULTS['Z'])
+    x = np.arange(-pre, post)
+    # For each run, compute profile weights time series: w_t = belief_t @ Z
+    weight_series = []
+    contexts = []
+    for logs in results_m3:
+        beliefs = np.vstack(logs['belief'])  # shape (T, n_contexts)
+        w = beliefs @ Z  # shape (T, n_profiles)
+        weight_series.append(w)
+        contexts.append(np.asarray(logs['context']))
+
+    # gather reversals per run with direction (post-reversal context)
+    n_profiles = Z.shape[1]
+    pooled_to_left = [np.zeros((0, pre+post)) for _ in range(n_profiles)]
+    pooled_to_right = [np.zeros((0, pre+post)) for _ in range(n_profiles)]
+
+    for w, ctx in zip(weight_series, contexts):
+        revs = find_reversals(ctx)
+        for r in revs:
+            start = r - pre
+            end = r + post
+            if start < 0 or end > w.shape[0]:
+                continue
+            post_ctx = ctx[r]
+            for p in range(n_profiles):
+                window = w[start:end, p]
+                if post_ctx == 'left_better':
+                    if pooled_to_left[p].size == 0:
+                        pooled_to_left[p] = window[np.newaxis, :]
+                    else:
+                        pooled_to_left[p] = np.vstack((pooled_to_left[p], window))
+                elif post_ctx == 'right_better':
+                    if pooled_to_right[p].size == 0:
+                        pooled_to_right[p] = window[np.newaxis, :]
+                    else:
+                        pooled_to_right[p] = np.vstack((pooled_to_right[p], window))
+
+    # plotting helper
+    def _plot_pooled(pooled_list, title_suffix, fname_suffix):
+        plt.figure(figsize=(8, 5))
+        colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+        for p in range(n_profiles):
+            pooled = pooled_list[p]
+            mean, lo, hi = compute_mean_and_ci(pooled)
+            if mean.size == 0:
+                continue
+            plt.plot(x, mean, label=f'Profile {p}', color=colors[p])
+            plt.fill_between(x, lo, hi, color=colors[p], alpha=0.2)
+        plt.axvline(0, color='k', linestyle='--')
+        plt.xlabel('Trials from reversal')
+        plt.ylabel('Profile weight')
+        plt.title(f'M3 profile weights around reversals ({title_suffix})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        if outpath is not None:
+            outdir = os.path.dirname(outpath)
+            ensure_dir(outdir)
+            base = os.path.splitext(os.path.basename(outpath))[0]
+            save_name = os.path.join(outdir, f"{base}_{fname_suffix}.png")
+            plt.savefig(save_name, dpi=FIG_DPI, bbox_inches='tight')
+            print(f"Saved: {save_name}")
+        plt.close()
+
+    # plot both directions
+    _plot_pooled(pooled_to_left, 'switch -> left_better', 'm3_profiles_to_left')
+    _plot_pooled(pooled_to_right, 'switch -> right_better', 'm3_profiles_to_right')
+
+
 def plot_gamma_around_reversals(results_by_model, pre=10, post=20, outpath=None):
     x = np.arange(-pre, post)
     plt.figure(figsize=(8, 5))
@@ -127,51 +202,11 @@ def plot_gamma_around_reversals(results_by_model, pre=10, post=20, outpath=None)
 
 
 def plot_m3_profile_weights(results_m3, pre=10, post=20, outpath=None):
-    # Get Z from M3_DEFAULTS
-    Z = np.array(M3_DEFAULTS['Z'])
-    x = np.arange(-pre, post)
-    # For each run, compute profile weights time series: w_t = belief_t @ Z
-    weight_series = []
-    for logs in results_m3:
-        beliefs = np.vstack(logs['belief'])  # shape (T, n_contexts)
-        w = beliefs @ Z  # shape (T, n_profiles)
-        weight_series.append(w)
-    revs = find_reversals(results_m3[0]['context'])
-    # For each profile, pool windows
-    profile_pooled = []
-    n_profiles = Z.shape[1]
-    for p in range(n_profiles):
-        pooled = []
-        for w in weight_series:
-            for r in revs:
-                start = r - pre
-                end = r + post
-                if start < 0 or end > w.shape[0]:
-                    continue
-                pooled.append(w[start:end, p])
-        if len(pooled) == 0:
-            profile_pooled.append(np.zeros((0, pre+post)))
-        else:
-            profile_pooled.append(np.vstack(pooled))
-    plt.figure(figsize=(8, 5))
-    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
-    for p in range(n_profiles):
-        pooled = profile_pooled[p]
-        mean, lo, hi = compute_mean_and_ci(pooled)
-        if mean.size == 0:
-            continue
-        plt.plot(x, mean, label=f'Profile {p}', color=colors[p])
-        plt.fill_between(x, lo, hi, color=colors[p], alpha=0.2)
-    plt.axvline(0, color='k', linestyle='--')
-    plt.xlabel('Trials from reversal')
-    plt.ylabel('Profile weight')
-    plt.title('M3 profile weights around reversals')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    ensure_dir(os.path.dirname(outpath))
-    plt.savefig(outpath, dpi=FIG_DPI, bbox_inches='tight')
-    print(f"Saved: {outpath}")
-    plt.close()
+    # (Function removed) Averaged/proportional pooling across all reversal directions
+    # was found to be unhelpful because it mixes opposite reversal directions
+    # and can mask direction-specific recruitment of profiles. Use
+    # `plot_m3_profile_weights_by_direction` instead.
+    raise RuntimeError("plot_m3_profile_weights has been removed. Use plot_m3_profile_weights_by_direction instead.")
 
 
 def run_mechanistic_experiment(models=('M1', 'M2', 'M3'), num_runs=20, num_trials=90, seed=42,
@@ -203,6 +238,8 @@ def run_mechanistic_experiment(models=('M1', 'M2', 'M3'), num_runs=20, num_trial
     plot_accuracy_around_reversals(results_by_model, pre=pre, post=post, outpath=os.path.join(outdir, f'mechanistic_accuracy_rev_{reversal_schedule[0]}_{reversal_schedule[1]}.png'))
     plot_gamma_around_reversals(results_by_model, pre=pre, post=post, outpath=os.path.join(outdir, f'mechanistic_gamma_rev_{reversal_schedule[0]}_{reversal_schedule[1]}.png'))
     plot_m3_profile_weights(results_by_model['M3'], pre=pre, post=post, outpath=os.path.join(outdir, f'mechanistic_m3_profiles_rev_{reversal_schedule[0]}_{reversal_schedule[1]}.png'))
+    # Also produce direction-specific profile-weight plots (switch -> left vs switch -> right)
+    plot_m3_profile_weights_by_direction(results_by_model['M3'], pre=pre, post=post, outpath=os.path.join(outdir, f'mechanistic_m3_profiles_rev_{reversal_schedule[0]}_{reversal_schedule[1]}.png'))
 
     print('Mechanistic analysis complete. Figures saved to results/figures')
     return results_by_model
