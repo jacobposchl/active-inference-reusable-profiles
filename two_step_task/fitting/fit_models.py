@@ -182,6 +182,11 @@ def compute_log_likelihood(model, params, participant_df):
             raise ValueError("participant_df missing 'stage1_choice' column")
 
         # Stage1 log-likelihood from agent posterior over policies
+        # build centralized obs mapping for this trial
+        full_obs = row_to_obs_ids(row)
+
+        # At stage1 the agent has not observed the planet/alien/reward yet; keep
+        # the modalities unobserved to mirror previous behavior.
         obs_ids = [0] * len(A_list)
         t = int(getattr(row, "trial"))
         ll += runner.log_likelihood_of_action(obs_ids, action_stage=0, action_choice=actual_s1, t=t)
@@ -199,7 +204,9 @@ def compute_log_likelihood(model, params, participant_df):
         # Map planet string to planet observation index used in A matrices
         # Use centralized mapping helper to ensure consistency
         obs_ids = [0] * len(A_list)
-        obs_ids[1] = int(planet_to_obs_idx(planet))
+        # prefer the centralized full_obs mapping but only expose the planet
+        # modality at stage2 (agent sees the planet before choosing alien)
+        obs_ids[1] = int(full_obs[1])
         ll += runner.log_likelihood_of_action(obs_ids, action_stage=1, action_choice=actual_s2, t=t)
 
         # Feedback / reward
@@ -208,6 +215,7 @@ def compute_log_likelihood(model, params, participant_df):
         except Exception:
             raise ValueError("participant_df missing 'reward' column")
 
-        runner.update_after_feedback(actual_s2, reward, planet)
+        # Pass the centralized observation mapping to the runner for learning
+        runner.update_after_feedback(actual_s2, reward, planet, obs_ids=full_obs)
 
     return float(ll)

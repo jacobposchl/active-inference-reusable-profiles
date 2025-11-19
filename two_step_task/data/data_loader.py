@@ -83,7 +83,7 @@ def reward_to_obs_idx(reward) -> int:
         return OBS_INDEX_MAP['reward']['null']
     if isinstance(reward, str):
         key = reward.strip().lower()
-        if 'reward' in key or key == '1':
+        if key in ('1', 'true', 'yes') or 'reward' in key:
             return OBS_INDEX_MAP['reward']['reward']
         return OBS_INDEX_MAP['reward']['no_reward']
     try:

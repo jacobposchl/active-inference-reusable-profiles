@@ -34,10 +34,9 @@ env/
 *.ipynb_checkpoints/
 
 # Results and data
-results/data/*.csv
-results/data/*.pkl
-results/data/*.npy
-results/data/*.h5
+synthetic_task/results/data/
+synthetic_task/results/figures/
+synthetic_task/results/analysis/
 
 two_step_task/data/raw/
 two_step_task/data/processed/

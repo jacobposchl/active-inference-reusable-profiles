@@ -87,8 +87,12 @@ class AgentRunner:
                     action_ll = np.logaddexp(action_ll, np.log(q_pi[pi_idx] + 1e-16))
         return float(action_ll)
 
-    def update_after_feedback(self, chosen_alien: int, reward: int, planet: str):
+    def update_after_feedback(self, chosen_alien: int, reward: int, planet: str = None, obs_ids: List[int] = None):
         """Update agent likelihoods using Dirichlet learning.
+
+        Parameters
+        - chosen_alien, reward, planet: legacy args kept for backward compat.
+        - obs_ids: optional list of modality observation indices (preferred).
 
         This function increments concentration parameters for the reward
         modality according to the posterior over hidden states inferred in
@@ -101,7 +105,13 @@ class AgentRunner:
             raise RuntimeError("A_conc not initialized for dirichlet learning")
 
         # decide observed outcome index for reward modality (assume 0=null, 1=no_reward, 2=reward)
-        obs_idx = 1 + int(bool(int(reward)))
+        if obs_ids is not None:
+            try:
+                obs_idx = int(obs_ids[self.reward_mod_idx])
+            except Exception:
+                obs_idx = 1 + int(bool(int(reward)))
+        else:
+            obs_idx = 1 + int(bool(int(reward)))
 
         # require last inferred qs to attribute responsibility across hidden states
         if self._last_qs is None:
