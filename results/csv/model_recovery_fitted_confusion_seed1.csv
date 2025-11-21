@@ -1,0 +1,6 @@
+generator,M1,M2,M3
+M1,4,0,6
+M2,6,0,4
+M3,6,0,4
+egreedy,0,6,4
+softmax,0,9,1

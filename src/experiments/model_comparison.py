@@ -10,6 +10,7 @@ import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import csv
+import concurrent.futures
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -206,6 +207,19 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
         obs_ids = runner.obs_labels_to_ids(next_obs)
 
     return ll_seq
+
+
+def _eval_model_on_ref(model_name, A, B, D, ref_logs, ref_type=None):
+    """Worker helper: evaluate a single model on a reference run and
+    return the computed metrics (picklable for ProcessPoolExecutor).
+    """
+    ll_seq = compute_sequence_ll_for_model(model_name, A, B, D, ref_logs)
+    new_logs = dict(ref_logs)
+    new_logs['ll'] = ll_seq
+    metrics = compute_metrics(new_logs)
+    metrics['reference_type'] = ref_type
+    metrics['model_name'] = model_name
+    return metrics
 
 
 def get_num_parameters(model_name):
@@ -455,18 +469,19 @@ def run_comparison(num_runs=20, num_trials=DEFAULT_TRIALS, seed=42, reversal_int
                 reference_runs.append(ref_logs)
 
         # Evaluate each candidate model on the same reference rollouts (teacher-forcing)
+        print(f"Evaluating models against reference type '{ref_type}' using up to {os.cpu_count() or 1} workers...")
+        tasks = []
         for model_name in models:
-            print(f"Evaluating {model_name} against reference type '{ref_type}'...")
-            for run_idx, ref_logs in enumerate(tqdm(reference_runs, desc=f"  {model_name}:{ref_type}")):
-                ll_seq = compute_sequence_ll_for_model(model_name, A, B, D, ref_logs)
-                # create a copy of the reference logs but with ll replaced by the
-                # teacher-forced log-probabilities produced by this model
-                new_logs = dict(ref_logs)
-                new_logs['ll'] = ll_seq
-                metrics = compute_metrics(new_logs)
-                # include reference type info in metrics for later aggregation
-                metrics['reference_type'] = ref_type
-                results[model_name].append(metrics)
+            for run_idx, ref_logs in enumerate(reference_runs):
+                tasks.append((model_name, A, B, D, ref_logs, ref_type))
+
+        # Use ProcessPoolExecutor to parallelize evaluations across models/runs
+        max_workers = min(len(tasks), os.cpu_count() or 1)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as exe:
+            futures = [exe.submit(_eval_model_on_ref, *t) for t in tasks]
+            for fut in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"  eval:{ref_type}"):
+                metrics = fut.result()
+                results[metrics['model_name']].append(metrics)
     
     print("\n" + "="*70)
     print("RESULTS SUMMARY")
@@ -771,6 +786,334 @@ def plot_model_comparison(results, num_trials, reversal_interval=None):
     plt.savefig(outpath, dpi=FIG_DPI, bbox_inches='tight')
     print(f"\nAggregated plot saved: {outpath}")
     plt.show()
+
+
+def run_model_recovery(generators=None, runs_per_generator=20, num_trials=80, seed=123, reversal_interval=None):
+    """Run a model-recovery grid: simulate data from each generator and
+    evaluate which model (M1/M2/M3) achieves highest teacher-forced
+    log-likelihood on each simulated run.
+
+    Saves a confusion matrix CSV and a detailed per-run CSV in `results/csv/`.
+    Returns the confusion counts dict and per-run results list.
+    """
+    if generators is None:
+        generators = ['M1', 'M2', 'M3', 'egreedy', 'softmax']
+
+    # Build shared components
+    A = build_A(NUM_MODALITIES, STATE_CONTEXTS, STATE_CHOICES,
+               OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
+               PROBABILITY_HINT, PROBABILITY_REWARD)
+    B = build_B(STATE_CONTEXTS, STATE_CHOICES, ACTION_CONTEXTS, ACTION_CHOICES,
+               context_volatility=DEFAULT_CONTEXT_VOLATILITY)
+    D = build_D(STATE_CONTEXTS, STATE_CHOICES)
+
+    candidate_models = ['M1', 'M2', 'M3']
+
+    # Prepare results storage
+    per_run_rows = []
+    confusion = {g: {m: 0 for m in candidate_models} for g in generators}
+
+    # Reuse a process pool for per-run model evaluations
+    max_workers = max(1, os.cpu_count() or 1)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as exe:
+        for gen in generators:
+            print(f"\nSimulating generator: {gen}")
+            for r in range(runs_per_generator):
+                run_seed = int(seed + r + (abs(hash(gen)) % 1000))
+
+                # Build environment
+                if reversal_interval is not None:
+                    reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
+                else:
+                    reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
+
+                env = TwoArmedBandit(probability_hint=PROBABILITY_HINT,
+                                     probability_reward=PROBABILITY_REWARD,
+                                     reversal_schedule=reversal_schedule)
+
+            # Generate reference logs depending on generator
+            if gen in ('M1', 'M2', 'M3'):
+                value_fn = create_model(gen, A, B, D)
+                runner = AgentRunnerWithLL(A, B, D, value_fn,
+                                           OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                                           OBSERVATION_CHOICES, ACTION_CHOICES,
+                                           reward_mod_idx=1)
+                try:
+                    runner.agent.gamma = 8.0
+                except Exception:
+                    pass
+                ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
+
+            elif gen in ('egreedy', 'softmax'):
+                ref_logs = simulate_baseline_run(env, policy_type=gen, T=num_trials, seed=run_seed,
+                                                 epsilon=0.1, temp=1.0, alpha=0.1)
+            else:
+                value_fn = create_model('M3', A, B, D)
+                runner = AgentRunnerWithLL(A, B, D, value_fn,
+                                           OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                                           OBSERVATION_CHOICES, ACTION_CHOICES,
+                                           reward_mod_idx=1)
+                ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
+
+            # Evaluate candidate models on this reference run in parallel
+            ll_by_model = {}
+            future_map = {m: exe.submit(compute_sequence_ll_for_model, m, A, B, D, ref_logs) for m in candidate_models}
+            for m, fut in future_map.items():
+                ll_seq = fut.result()
+                total_ll = float(np.sum(ll_seq))
+                ll_by_model[m] = total_ll
+
+            # Determine winner (highest log-likelihood)
+            best_model = max(ll_by_model, key=ll_by_model.get)
+            confusion[gen][best_model] += 1
+
+            # Record per-run row
+            per_run_rows.append({
+                'generator': gen,
+                'run_idx': r,
+                'seed': run_seed,
+                **{f'll_{m}': ll_by_model[m] for m in candidate_models},
+                'winner': best_model
+            })
+
+    # Save outputs
+    csv_dir = os.path.join('results', 'csv')
+    os.makedirs(csv_dir, exist_ok=True)
+    rows_path = os.path.join(csv_dir, f'model_recovery_per_run_seed{seed}.csv')
+    with open(rows_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        header = ['generator', 'run_idx', 'seed'] + [f'll_{m}' for m in candidate_models] + ['winner']
+        writer.writerow(header)
+        for row in per_run_rows:
+            writer.writerow([row['generator'], row['run_idx'], row['seed']] + [row[f'll_{m}'] for m in candidate_models] + [row['winner']])
+
+    # Save confusion matrix
+    conf_path = os.path.join(csv_dir, f'model_recovery_confusion_seed{seed}.csv')
+    with open(conf_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        header = ['generator'] + candidate_models
+        writer.writerow(header)
+        for gen in generators:
+            writer.writerow([gen] + [confusion[gen][m] for m in candidate_models])
+
+    print(f"\nModel recovery per-run CSV saved: {rows_path}")
+    print(f"Confusion matrix saved: {conf_path}")
+
+    return confusion, per_run_rows
+
+
+def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
+    """Compute total log-likelihood of ref_logs under a model defined by value_fn."""
+    runner = AgentRunnerWithLL(A, B, D, value_fn,
+                               OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                               OBSERVATION_CHOICES, ACTION_CHOICES,
+                               reward_mod_idx=1)
+
+    # teacher-forced evaluation
+    initial_obs_labels = ['null', 'null', 'observe_start']
+    obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
+    T = len(ref_logs['action'])
+    ll_seq = []
+    for t in range(T):
+        a = ref_logs['action'][t]
+        ll_t = runner.action_logprob(obs_ids, a, t)
+        ll_seq.append(ll_t)
+        # advance
+        if 'hint_label' in ref_logs and ref_logs['hint_label']:
+            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+        else:
+            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+        obs_ids = runner.obs_labels_to_ids(next_obs)
+
+    return float(np.sum(ll_seq)), ll_seq
+
+
+def _eval_m1_gamma(A, B, D, g_val, ref_logs):
+    value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=g_val)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    return total_ll
+
+
+def _eval_m2_params(A, B, D, g_base, k, ref_logs):
+    def gamma_schedule(q, t, g_base=g_base, k=k):
+        p = np.clip(np.asarray(q, float), 1e-12, 1.0)
+        H = -(p * np.log(p)).sum()
+        return g_base / (1.0 + k * H)
+    value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    return total_ll
+
+
+def _eval_m3_params(A, B, D, g_val, xi_scale, ref_logs):
+    # build temp agent policies inside worker
+    from pymdp.agent import Agent
+    from pymdp import utils as pymdp_utils
+    C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
+    temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
+                       policy_len=2, inference_horizon=1,
+                       control_fac_idx=[1], use_utility=True,
+                       use_states_info_gain=True,
+                       action_selection="stochastic", gamma=16)
+    policies = temp_agent.policies
+    num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+
+    # build scaled profiles
+    profiles = []
+    for p in M3_DEFAULTS['profiles']:
+        prof = dict(p)
+        prof['gamma'] = g_val
+        prof['xi_logits'] = (np.array(p['xi_logits'], float) * xi_scale).tolist()
+        profiles.append(prof)
+
+    value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    return total_ll
+
+
+def run_model_recovery_with_fitting(generators=None, runs_per_generator=10, num_trials=80, seed=123, reversal_interval=None):
+    """
+    Model recovery where each candidate model is first fit via a small grid
+    search of value-function parameters, then compared on fitted total LL.
+    """
+    if generators is None:
+        generators = ['M1', 'M2', 'M3', 'egreedy', 'softmax']
+
+    # Build shared components
+    A = build_A(NUM_MODALITIES, STATE_CONTEXTS, STATE_CHOICES,
+               OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
+               PROBABILITY_HINT, PROBABILITY_REWARD)
+    B = build_B(STATE_CONTEXTS, STATE_CHOICES, ACTION_CONTEXTS, ACTION_CHOICES,
+               context_volatility=DEFAULT_CONTEXT_VOLATILITY)
+    D = build_D(STATE_CONTEXTS, STATE_CHOICES)
+
+    candidate_models = ['M1', 'M2', 'M3']
+    confusion = {g: {m: 0 for m in candidate_models} for g in generators}
+    per_run_rows = []
+
+    # Reuse a process pool for fitting/evaluation
+    max_workers = max(1, os.cpu_count() or 1)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as exe:
+        for gen in generators:
+            print(f"\nSimulating generator: {gen}")
+            for r in range(runs_per_generator):
+                run_seed = int(seed + r + (abs(hash(gen)) % 1000))
+
+            # Build environment
+            if reversal_interval is not None:
+                reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
+            else:
+                reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
+
+            env = TwoArmedBandit(probability_hint=PROBABILITY_HINT,
+                                 probability_reward=PROBABILITY_REWARD,
+                                 reversal_schedule=reversal_schedule)
+
+            # Generate reference logs depending on generator
+            if gen in ('M1', 'M2', 'M3'):
+                value_fn_gen = create_model(gen, A, B, D)
+                runner_gen = AgentRunnerWithLL(A, B, D, value_fn_gen,
+                                               OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                                               OBSERVATION_CHOICES, ACTION_CHOICES,
+                                               reward_mod_idx=1)
+                try:
+                    runner_gen.agent.gamma = 8.0
+                except Exception:
+                    pass
+                ref_logs = run_episode_with_ll(runner_gen, env, T=num_trials, verbose=False)
+            elif gen in ('egreedy', 'softmax'):
+                ref_logs = simulate_baseline_run(env, policy_type=gen, T=num_trials, seed=run_seed,
+                                                 epsilon=0.1, temp=1.0, alpha=0.1)
+            else:
+                value_fn_gen = create_model('M3', A, B, D)
+                runner_gen = AgentRunnerWithLL(A, B, D, value_fn_gen,
+                                               OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                                               OBSERVATION_CHOICES, ACTION_CHOICES,
+                                               reward_mod_idx=1)
+                ref_logs = run_episode_with_ll(runner_gen, env, T=num_trials, verbose=False)
+
+            # Fit each candidate model via small grid (parallelized)
+            fitted_ll = {}
+            fitted_params = {}
+
+            # M1 grid: parallel evaluate gamma candidates
+            m1_gammas = [1.0, 2.5, 8.0, 16.0]
+            futures = {g: exe.submit(_eval_m1_gamma, A, B, D, g, ref_logs) for g in m1_gammas}
+            best_ll = -np.inf
+            best_g = None
+            for g_val, fut in futures.items():
+                total_ll = fut.result()
+                if total_ll > best_ll:
+                    best_ll = total_ll
+                    best_g = g_val
+            fitted_ll['M1'] = best_ll
+            fitted_params['M1'] = {'gamma': best_g}
+
+            # M2 grid
+            m2_gamma_bases = [1.0, 2.5, 8.0]
+            m2_k = [0.1, 1.0, 4.0]
+            param_pairs = [(g_base, k) for g_base in m2_gamma_bases for k in m2_k]
+            futures = {pair: exe.submit(_eval_m2_params, A, B, D, pair[0], pair[1], ref_logs) for pair in param_pairs}
+            best_ll = -np.inf
+            best_params_m2 = None
+            for (g_base, k), fut in futures.items():
+                total_ll = fut.result()
+                if total_ll > best_ll:
+                    best_ll = total_ll
+                    best_params_m2 = {'gamma_base': g_base, 'entropy_k': k}
+            fitted_ll['M2'] = best_ll
+            fitted_params['M2'] = best_params_m2
+
+            # M3 grid: vary per-profile gamma and xi scale (parallel)
+            m3_gammas = [1.0, 2.5, 8.0]
+            xi_scales = [0.5, 1.0, 2.0]
+            param_pairs = [(g, xi) for g in m3_gammas for xi in xi_scales]
+            futures = {pair: exe.submit(_eval_m3_params, A, B, D, pair[0], pair[1], ref_logs) for pair in param_pairs}
+            best_ll = -np.inf
+            best_params_m3 = None
+            for (g_val, xi_scale), fut in futures.items():
+                total_ll = fut.result()
+                if total_ll > best_ll:
+                    best_ll = total_ll
+                    best_params_m3 = {'gamma': g_val, 'xi_scale': xi_scale}
+
+            fitted_ll['M3'] = best_ll
+            fitted_params['M3'] = best_params_m3
+
+            # Determine winner among fitted models
+            winner = max(fitted_ll, key=fitted_ll.get)
+            confusion[gen][winner] += 1
+
+            per_run_rows.append({
+                'generator': gen,
+                'run_idx': r,
+                'seed': run_seed,
+                **{f'fitted_ll_{m}': fitted_ll[m] for m in candidate_models},
+                'winner': winner,
+                'fitted_params': fitted_params
+            })
+
+    # Save results
+    csv_dir = os.path.join('results', 'csv')
+    os.makedirs(csv_dir, exist_ok=True)
+    rows_path = os.path.join(csv_dir, f'model_recovery_fitted_per_run_seed{seed}.csv')
+    with open(rows_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        header = ['generator', 'run_idx', 'seed'] + [f'fitted_ll_{m}' for m in candidate_models] + ['winner']
+        writer.writerow(header)
+        for row in per_run_rows:
+            writer.writerow([row['generator'], row['run_idx'], row['seed']] + [row[f'fitted_ll_{m}'] for m in candidate_models] + [row['winner']])
+
+    conf_path = os.path.join(csv_dir, f'model_recovery_fitted_confusion_seed{seed}.csv')
+    with open(conf_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        header = ['generator'] + candidate_models
+        writer.writerow(header)
+        for gen in generators:
+            writer.writerow([gen] + [confusion[gen][m] for m in candidate_models])
+
+    print(f"\nFitted model recovery per-run CSV saved: {rows_path}")
+    print(f"Fitted confusion matrix saved: {conf_path}")
+    return confusion, per_run_rows
 
 
 def main():
