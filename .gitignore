@@ -24,22 +24,10 @@ share/python-wheels/
 MANIFEST
 
 # Virtual environments
-venv/
-ENV/
-env/
 .venv
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb_checkpoints/
-
-# Results and data
-synthetic_task/results/data/
-synthetic_task/results/figures/
-synthetic_task/results/analysis/
-
-two_step_task/data/raw/
-two_step_task/data/processed/
+# Results
+results/
 
 # Keep directory structure but ignore contents
 !results/data/.gitkeep
@@ -53,20 +41,7 @@ two_step_task/data/processed/
 *~
 .DS_Store
 
-# Logs
-*.log
-
-# Temporary files
-*.tmp
-*.bak
-*.backup
-
 # Model checkpoints
 *.pth
 *.ckpt
 *.h5
-
-# Large files
-*.zip
-*.tar.gz
-*.rar

@@ -161,3 +161,47 @@ def _eval_m3_params(A, B, D, g_val, xi_scale, ref_logs):
     value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
     total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
     return total_ll
+
+
+def _eval_m3_params_per_profile(A, B, D, gammas, xi_scales_profile, ref_logs):
+    """Worker helper: evaluate M3 with per-profile gammas and per-profile xi scales.
+
+    Parameters:
+    - gammas: sequence of per-profile gamma values
+    - xi_scales_profile: sequence (length=num_profiles) of 3-tuples (scales for hint,left,right)
+    - ref_logs: single run logs to evaluate
+    """
+    if A is None:
+        try:
+            policies = M3_POLICIES_GLOB
+            num_actions_per_factor = NUM_ACTIONS_PER_FACTOR_GLOB
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            policies = None
+            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+            A_loc, B_loc, D_loc = A, B, D
+    else:
+        policies = None
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        A_loc, B_loc, D_loc = A, B, D
+
+    profiles = []
+    num_profiles = len(M3_DEFAULTS['profiles'])
+    for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
+        prof = dict(p)
+        prof['gamma'] = float(gammas[p_idx])
+        orig_xi = np.array(p['xi_logits'], float)
+        scales3 = xi_scales_profile[p_idx]
+        new_xi = orig_xi.copy()
+        # scales3 expected to be length-3 for [hint,left,right]
+        new_xi[1] = orig_xi[1] * float(scales3[0])
+        new_xi[2] = orig_xi[2] * float(scales3[1])
+        new_xi[3] = orig_xi[3] * float(scales3[2])
+        prof['xi_logits'] = new_xi.tolist()
+        profiles.append(prof)
+
+    value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return total_ll

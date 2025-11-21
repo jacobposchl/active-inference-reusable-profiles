@@ -10,9 +10,13 @@ import os
 import logging
 import numpy as np
 from tqdm import tqdm
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 from src.utils.recovery_helpers import generate_all_runs, fit_model_on_runs, evaluate_on_test
 
-# Using simple print statements for progress feedback (no logger)
+# Using simple print statements for progress feedback
 def _print_info(*args, **kwargs):
     print("[cv_recovery]", *args, **kwargs)
 
