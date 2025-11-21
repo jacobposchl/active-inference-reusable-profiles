@@ -119,6 +119,7 @@ def fit_model_on_runs(model_name, A, B, D, ref_logs_list):
     best_params = None
     # Number of worker processes for parallel sections (can be set via env)
     max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
+    print(f"Max Workers: {max_workers}")
 
     if model_name == 'M1':
         # Two-stage search for M1: coarse grid then local refinement.

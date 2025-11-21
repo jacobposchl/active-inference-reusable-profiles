@@ -14,7 +14,9 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from src.utils.recovery_helpers import generate_all_runs, fit_model_on_runs, evaluate_on_test
+from src.utils.recovery_helpers import generate_all_runs, fit_model_on_runs, evaluate_on_test, _make_temp_agent_and_policies
+from src.utils.ll_eval import evaluate_ll_with_valuefn
+from src.models import make_value_fn
 
 # Using simple print statements for progress feedback
 def _print_info(*args, **kwargs):
@@ -52,11 +54,100 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
             fitted_params[m] = fit_model_on_runs(m, A, B, D, train_refs)
             _print_debug(f"Fitted params for {m}: {fitted_params[m]}")
 
-        # Evaluate on test
+        # Evaluate on test: compute per-run and per-generator LLs (detailed)
+        test_refs_full = [refs[i] for i in test_idx]  # each has 'gen' and 'ref_logs'
         for m in candidate_models:
-            test_ll = evaluate_on_test(m, A, B, D, fitted_params[m], test_refs)
-            per_fold_test_ll[m].append(test_ll)
-            _print_info(f"Fold {k+1}: model {m} test LL = {test_ll:.3f}")
+            _print_debug(f"Evaluating model {m} on {len(test_refs_full)} test runs (detailed)")
+
+            # build value function for this model using fitted params
+            params = fitted_params[m]
+            # Helper: construct value_fn similar to recovery_helpers.evaluate_on_test
+            if m == 'M1':
+                value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=params['gamma'])
+            elif m == 'M2':
+                def gamma_schedule(q, t, g_base=params['gamma_base'], k=params['entropy_k']):
+                    p = np.clip(np.asarray(q, float), 1e-12, 1.0)
+                    H = -(p * np.log(p)).sum()
+                    return g_base / (1.0 + k * H)
+                value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
+            else:
+                # M3: need policies and per-profile param wiring
+                policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
+                profiles = []
+                if params is None:
+                    params = {}
+
+                if 'gamma' in params and 'xi_scale' in params:
+                    for p in M3_DEFAULTS['profiles']:
+                        prof = dict(p)
+                        prof['gamma'] = params['gamma']
+                        prof['xi_logits'] = (np.array(p['xi_logits'], float) * params['xi_scale']).tolist()
+                        profiles.append(prof)
+                elif 'gamma_profile' in params and 'xi_scales_profile' in params:
+                    gamma_profile = params['gamma_profile']
+                    xi_scales_profile = params['xi_scales_profile']
+                    for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
+                        prof = dict(p)
+                        prof['gamma'] = float(gamma_profile[p_idx])
+                        orig_xi = np.array(p['xi_logits'], float)
+                        scales3 = xi_scales_profile[p_idx]
+                        new_xi = orig_xi.copy()
+                        new_xi[1] = orig_xi[1] * float(scales3[0])
+                        new_xi[2] = orig_xi[2] * float(scales3[1])
+                        new_xi[3] = orig_xi[3] * float(scales3[2])
+                        prof['xi_logits'] = new_xi.tolist()
+                        profiles.append(prof)
+                else:
+                    for p in M3_DEFAULTS['profiles']:
+                        profiles.append(dict(p))
+
+                value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
+
+            # Evaluate each test run, collect per-run LLs and per-trial sequences
+            per_run_records = []
+            from collections import defaultdict
+            gen_totals = defaultdict(float)
+            gen_counts = defaultdict(int)
+            # store per-run ll by run_idx for paired diffs
+            per_run_by_idx = {}
+
+            for ref in test_refs_full:
+                total_ll, ll_seq = evaluate_ll_with_valuefn(value_fn, A, B, D, ref['ref_logs'])
+                per_run_records.append({'model': m, 'gen': ref['gen'], 'run_idx': ref['run_idx'], 'total_ll': float(total_ll), 'n_trials': len(ll_seq)})
+                gen_totals[ref['gen']] += float(total_ll)
+                gen_counts[ref['gen']] += 1
+                per_run_by_idx[ref['run_idx']] = float(total_ll)
+
+            # save per-run CSV for this fold and model
+            csv_dir = os.path.join('results', 'csv')
+            os.makedirs(csv_dir, exist_ok=True)
+            per_run_path = os.path.join(csv_dir, f'cv_recovery_fold_{k+1}_{m}_per_run.csv')
+            with open(per_run_path, 'w', newline='') as f:
+                import csv as _csv
+                writer = _csv.writer(f)
+                writer.writerow(['model', 'gen', 'run_idx', 'total_ll', 'n_trials'])
+                for r in per_run_records:
+                    writer.writerow([r['model'], r['gen'], r['run_idx'], f"{r['total_ll']:.6f}", r['n_trials']])
+
+            # compute per-generator aggregates and save
+            per_gen_path = os.path.join(csv_dir, f'cv_recovery_fold_{k+1}_{m}_per_gen.csv')
+            with open(per_gen_path, 'w', newline='') as f:
+                import csv as _csv
+                writer = _csv.writer(f)
+                writer.writerow(['model', 'gen', 'total_ll', 'n_runs', 'mean_ll_per_run', 'mean_ll_per_trial'])
+                for g in gen_totals:
+                    total = gen_totals[g]
+                    n = gen_counts[g]
+                    mean_run = total / n if n > 0 else float('nan')
+                    # estimate trials per run from first matching ref
+                    trials_per_run = next((r['n_trials'] for r in per_run_records if r['gen'] == g), 0)
+                    mean_trial = mean_run / trials_per_run if trials_per_run else float('nan')
+                    writer.writerow([m, g, f"{total:.6f}", n, f"{mean_run:.6f}", f"{mean_trial:.6f}"])
+
+            # append aggregated total LL for compatibility with downstream code
+            total_all = sum([r['total_ll'] for r in per_run_records])
+            per_fold_test_ll[m].append(total_all)
+            _print_info(f"Fold {k+1}: model {m} test LL = {total_all:.3f}")
 
         # Save fold checkpoint
         csv_dir = os.path.join('results', 'csv')
