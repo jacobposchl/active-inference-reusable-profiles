@@ -191,6 +191,57 @@ class AgentRunnerWithLL(AgentRunner):
         
         return action_label, qs, q_pi, efe, self.gamma_t, action_ll
 
+    def action_logprob(self, obs_ids, action_label, t):
+        """
+        Compute log-probability of a provided `action_label` under the agent's
+        current policy posterior when conditioned on `obs_ids`.
+
+        This implements teacher-forcing style evaluation: it does inference on
+        the supplied observation, updates internal value parameters, computes
+        the posterior over policies `q_pi`, and returns the log-probability of
+        the given action (log p(a_t | o_{1:t}, a_{1:t-1})).
+        """
+        # Infer hidden states from supplied observations
+        qs = self.agent.infer_states(obs_ids)
+        q_context = qs[0]
+
+        # Value/profile update
+        C_t, E_t, gamma_t = self.value_fn(q_context, t)
+        self.agent.C[self.reward_mod_idx] = C_t
+        if E_t is not None and len(E_t) == len(self.agent.policies):
+            self.agent.E = E_t
+
+        self.gamma_t = float(gamma_t)
+        self.agent.gamma = self.gamma_t
+
+        # Infer policies
+        q_pi, efe = self.agent.infer_policies()
+
+        # Map action label to index for the choice factor
+        try:
+            u_choice = int(self.action_choices.index(action_label))
+        except ValueError:
+            # Fallback: if action label format differs, try to match by suffix
+            u_choice = None
+            for idx, lab in enumerate(self.action_choices):
+                if lab == action_label:
+                    u_choice = idx
+                    break
+            if u_choice is None:
+                raise
+
+        # Compute log-probability by summing q_pi over policies whose first
+        # action matches the requested action (log-sum-exp)
+        action_ll = -np.inf
+        for pi_idx, policy in enumerate(self.agent.policies):
+            if int(policy[0, 1]) == u_choice:
+                if action_ll == -np.inf:
+                    action_ll = np.log(q_pi[pi_idx] + 1e-16)
+                else:
+                    action_ll = np.logaddexp(action_ll, np.log(q_pi[pi_idx] + 1e-16))
+
+        return action_ll
+
 
 def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
                 print_around_reversals=False, window=5):
@@ -233,7 +284,8 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
         'gamma': [],
         'action': [],
         'reward_label': [],
-        'choice_label': []
+        'choice_label': [],
+        'hint_label': []
     }
     
     reversal_trials = set(env.reversal_schedule) if env.reversal_schedule else set()
@@ -252,6 +304,7 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
         logs['belief'].append(qs[0].copy())
         logs['gamma'].append(gamma_t)
         logs['action'].append(action_label)
+        logs['hint_label'].append(obs_labels[0])
         logs['reward_label'].append(obs_labels[1])
         logs['choice_label'].append(obs_labels[2])
         
@@ -285,6 +338,7 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         'action': [],
         'reward_label': [],
         'choice_label': [],
+        'hint_label': [],
         'll': []
     }
     
@@ -306,8 +360,11 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         logs['belief'].append(qs[0].copy())
         logs['gamma'].append(gamma_t)
         logs['action'].append(action_label)
+        logs['hint_label'].append(obs_labels[0])
         logs['reward_label'].append(obs_labels[1])
         logs['choice_label'].append(obs_labels[2])
         logs['ll'].append(ll_t)
+
+        # (method moved to class scope)
     
     return logs
