@@ -1,3 +1,4 @@
+
 """K-fold cross-validation for model recovery.
 
 Re-simulates the same generators/runs used in the recovery tests, fits each
@@ -6,165 +7,23 @@ evaluates held-out runs, and reports per-model test LL and paired ΔELPD
 with standard errors across folds.
 """
 import os
+import logging
 import numpy as np
 from tqdm import tqdm
-from src.experiments.model_comparison import (
-    create_model, simulate_baseline_run, evaluate_ll_with_valuefn,
-    build_A, build_B, build_D, run_episode_with_ll, make_value_fn, AgentRunnerWithLL
-)
+from src.utils.recovery_helpers import generate_all_runs, fit_model_on_runs, evaluate_on_test
+
+# Using simple print statements for progress feedback (no logger)
+def _print_info(*args, **kwargs):
+    print("[cv_recovery]", *args, **kwargs)
+
+def _print_debug(*args, **kwargs):
+    print("[cv_recovery DEBUG]", *args, **kwargs)
+
 from config.experiment_config import *
-from src.environment import TwoArmedBandit
-
-
-def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal_interval=None):
-    A = build_A(NUM_MODALITIES, STATE_CONTEXTS, STATE_CHOICES,
-               OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
-               PROBABILITY_HINT, PROBABILITY_REWARD)
-    B = build_B(STATE_CONTEXTS, STATE_CHOICES, ACTION_CONTEXTS, ACTION_CHOICES,
-               context_volatility=DEFAULT_CONTEXT_VOLATILITY)
-    D = build_D(STATE_CONTEXTS, STATE_CHOICES)
-
-    refs = []  # list of dicts: {'gen':, 'run_idx':, 'ref_logs': }
-    for gen in generators:
-        for r in range(runs_per_generator):
-            run_seed = int(seed + r + (abs(hash(gen)) % 1000))
-            if reversal_interval is not None:
-                reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
-            else:
-                reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
-
-            env = TwoArmedBandit(probability_hint=PROBABILITY_HINT, probability_reward=PROBABILITY_REWARD,
-                                 reversal_schedule=reversal_schedule)
-
-            if gen in ('M1', 'M2', 'M3'):
-                value_fn = create_model(gen, A, B, D)
-                runner = AgentRunnerWithLL(A, B, D, value_fn,
-                                           OBSERVATION_HINTS, OBSERVATION_REWARDS,
-                                           OBSERVATION_CHOICES, ACTION_CHOICES,
-                                           reward_mod_idx=1)
-                try:
-                    runner.agent.gamma = 8.0
-                except Exception:
-                    pass
-                ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
-            elif gen in ('egreedy', 'softmax'):
-                ref_logs = simulate_baseline_run(env, policy_type=gen, T=num_trials, seed=run_seed,
-                                                 epsilon=0.1, temp=1.0, alpha=0.1)
-            else:
-                value_fn = create_model('M3', A, B, D)
-                runner = AgentRunnerWithLL(A, B, D, value_fn,
-                                           OBSERVATION_HINTS, OBSERVATION_REWARDS,
-                                           OBSERVATION_CHOICES, ACTION_CHOICES,
-                                           reward_mod_idx=1)
-                ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
-
-            refs.append({'gen': gen, 'run_idx': r, 'seed': run_seed, 'ref_logs': ref_logs})
-
-    return A, B, D, refs
-
-
-def fit_model_on_runs(model_name, A, B, D, ref_logs_list):
-    """Fit model via small grid search on provided reference logs (list)."""
-    best_ll = -np.inf
-    best_params = None
-    # M1
-    if model_name == 'M1':
-        for g in [1.0, 2.5, 8.0, 16.0]:
-            value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=g)
-            total = 0.0
-            for ref in ref_logs_list:
-                ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref)
-                total += ll
-            if total > best_ll:
-                best_ll = total
-                best_params = {'gamma': g}
-
-    elif model_name == 'M2':
-        for g_base in [1.0, 2.5, 8.0]:
-            for k in [0.1, 1.0, 4.0]:
-                def gamma_schedule(q, t, g_base=g_base, k=k):
-                    p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-                    H = -(p * np.log(p)).sum()
-                    return g_base / (1.0 + k * H)
-                value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
-                total = 0.0
-                for ref in ref_logs_list:
-                    ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref)
-                    total += ll
-                if total > best_ll:
-                    best_ll = total
-                    best_params = {'gamma_base': g_base, 'entropy_k': k}
-
-    elif model_name == 'M3':
-        from pymdp.agent import Agent
-        from pymdp import utils as pymdp_utils
-        C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
-        temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
-                         policy_len=2, inference_horizon=1,
-                         control_fac_idx=[1], use_utility=True,
-                         use_states_info_gain=True,
-                         action_selection="stochastic", gamma=16)
-        policies = temp_agent.policies
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-
-        for g in [1.0, 2.5, 8.0]:
-            for xi_scale in [0.5, 1.0, 2.0]:
-                profiles = []
-                for p in M3_DEFAULTS['profiles']:
-                    prof = dict(p)
-                    prof['gamma'] = g
-                    prof['xi_logits'] = (np.array(p['xi_logits'], float) * xi_scale).tolist()
-                    profiles.append(prof)
-                value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
-                total = 0.0
-                for ref in ref_logs_list:
-                    ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref)
-                    total += ll
-                if total > best_ll:
-                    best_ll = total
-                    best_params = {'gamma': g, 'xi_scale': xi_scale}
-
-    return best_params
-
-
-def evaluate_on_test(model_name, A, B, D, params, ref_logs_list):
-    # Build value_fn from params
-    if model_name == 'M1':
-        value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=params['gamma'])
-    elif model_name == 'M2':
-        def gamma_schedule(q, t, g_base=params['gamma_base'], k=params['entropy_k']):
-            p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-            H = -(p * np.log(p)).sum()
-            return g_base / (1.0 + k * H)
-        value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
-    else:
-        from pymdp.agent import Agent
-        from pymdp import utils as pymdp_utils
-        C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
-        temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
-                         policy_len=2, inference_horizon=1,
-                         control_fac_idx=[1], use_utility=True,
-                         use_states_info_gain=True,
-                         action_selection="stochastic", gamma=16)
-        policies = temp_agent.policies
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-        profiles = []
-        for p in M3_DEFAULTS['profiles']:
-            prof = dict(p)
-            prof['gamma'] = params['gamma']
-            prof['xi_logits'] = (np.array(p['xi_logits'], float) * params['xi_scale']).tolist()
-            profiles.append(prof)
-        value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
-
-    # Evaluate
-    total = 0.0
-    for ref in ref_logs_list:
-        ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref)
-        total += ll
-    return total
 
 
 def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator=10, num_trials=80, seed=1, reversal_interval=40, K=5):
+    _print_info(f"Generating all reference runs: generators={generators} runs_per_generator={runs_per_generator} num_trials={num_trials} K={K}")
     A, B, D, refs = generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal_interval)
     N = len(refs)
     idx = np.arange(N)
@@ -176,6 +35,7 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
     per_fold_test_ll = {m: [] for m in candidate_models}
 
     for k in range(K):
+        _print_info(f"Starting fold {k+1}/{K}: test_size={len(folds[k])}")
         test_idx = folds[k]
         train_idx = np.hstack([folds[i] for i in range(K) if i != k])
         train_refs = [refs[i]['ref_logs'] for i in train_idx]
@@ -184,12 +44,28 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
         # Fit each model on training refs
         fitted_params = {}
         for m in candidate_models:
+            _print_debug(f"Fitting model {m} on {len(train_refs)} training runs")
             fitted_params[m] = fit_model_on_runs(m, A, B, D, train_refs)
+            _print_debug(f"Fitted params for {m}: {fitted_params[m]}")
 
         # Evaluate on test
         for m in candidate_models:
             test_ll = evaluate_on_test(m, A, B, D, fitted_params[m], test_refs)
             per_fold_test_ll[m].append(test_ll)
+            _print_info(f"Fold {k+1}: model {m} test LL = {test_ll:.3f}")
+
+        # Save fold checkpoint
+        csv_dir = os.path.join('results', 'csv')
+        os.makedirs(csv_dir, exist_ok=True)
+        fold_path = os.path.join(csv_dir, f'cv_recovery_fold_{k+1}.csv')
+        with open(fold_path, 'w', newline='') as f:
+            import csv as _csv
+            writer = _csv.writer(f)
+            header = ['model', 'test_ll']
+            writer.writerow(header)
+            for m in candidate_models:
+                writer.writerow([m, per_fold_test_ll[m][-1]])
+        _print_info(f"Saved fold {k+1} checkpoint: {fold_path}")
 
     # Aggregate and compute ΔELPD-like stats
     results = {}

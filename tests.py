@@ -1,1 +1,0 @@
-python -c "import os,sys,time; sys.path.insert(0,'.'); import src.experiments.model_comparison as mc; os.environ.pop('MODEL_COMP_MAX_WORKERS',None); t=time.time(); mc.run_model_recovery(generators=['M1'], runs_per_generator=2, num_trials=40, seed=1); print('elapsed_parallel',time.time()-t)"
