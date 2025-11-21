@@ -213,13 +213,45 @@ def _eval_model_on_ref(model_name, A, B, D, ref_logs, ref_type=None):
     """Worker helper: evaluate a single model on a reference run and
     return the computed metrics (picklable for ProcessPoolExecutor).
     """
-    ll_seq = compute_sequence_ll_for_model(model_name, A, B, D, ref_logs)
+    # prefer globals when available (workers initialize these once)
+    try:
+        A_loc = A_GLOB
+        B_loc = B_GLOB
+        D_loc = D_GLOB
+    except NameError:
+        A_loc, B_loc, D_loc = A, B, D
+
+    ll_seq = compute_sequence_ll_for_model(model_name, A_loc, B_loc, D_loc, ref_logs)
     new_logs = dict(ref_logs)
     new_logs['ll'] = ll_seq
     metrics = compute_metrics(new_logs)
     metrics['reference_type'] = ref_type
     metrics['model_name'] = model_name
     return metrics
+
+
+def _worker_init(A, B, D):
+    """Initializer for worker processes: store shared matrices and precompute
+    M3 policies to avoid repeated expensive construction per-task.
+    """
+    global A_GLOB, B_GLOB, D_GLOB, M3_POLICIES_GLOB, NUM_ACTIONS_PER_FACTOR_GLOB
+    A_GLOB = A
+    B_GLOB = B
+    D_GLOB = D
+    try:
+        from pymdp.agent import Agent
+        from pymdp import utils as pymdp_utils
+        C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
+        temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
+                         policy_len=2, inference_horizon=1,
+                         control_fac_idx=[1], use_utility=True,
+                         use_states_info_gain=True,
+                         action_selection="stochastic", gamma=16)
+        M3_POLICIES_GLOB = temp_agent.policies
+        NUM_ACTIONS_PER_FACTOR_GLOB = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+    except Exception:
+        M3_POLICIES_GLOB = None
+        NUM_ACTIONS_PER_FACTOR_GLOB = None
 
 
 def get_num_parameters(model_name):
@@ -473,12 +505,13 @@ def run_comparison(num_runs=20, num_trials=DEFAULT_TRIALS, seed=42, reversal_int
         tasks = []
         for model_name in models:
             for run_idx, ref_logs in enumerate(reference_runs):
-                tasks.append((model_name, A, B, D, ref_logs, ref_type))
+                tasks.append((model_name, ref_logs, ref_type))
 
         # Use ProcessPoolExecutor to parallelize evaluations across models/runs
-        max_workers = min(len(tasks), os.cpu_count() or 1)
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as exe:
-            futures = [exe.submit(_eval_model_on_ref, *t) for t in tasks]
+        max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', min(len(tasks), os.cpu_count() or 1)))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
+            # submit tasks without re-sending A/B/D (workers have them via init)
+            futures = [exe.submit(_eval_model_on_ref, t[0], None, None, None, t[1], t[2]) for t in tasks]
             for fut in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"  eval:{ref_type}"):
                 metrics = fut.result()
                 results[metrics['model_name']].append(metrics)
@@ -813,9 +846,9 @@ def run_model_recovery(generators=None, runs_per_generator=20, num_trials=80, se
     per_run_rows = []
     confusion = {g: {m: 0 for m in candidate_models} for g in generators}
 
-    # Reuse a process pool for per-run model evaluations
-    max_workers = max(1, os.cpu_count() or 1)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as exe:
+    # Reuse a process pool for per-run model evaluations (workers initialize A/B/D)
+    max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', max(1, os.cpu_count() or 1)))
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
         for gen in generators:
             print(f"\nSimulating generator: {gen}")
             for r in range(runs_per_generator):
@@ -831,37 +864,37 @@ def run_model_recovery(generators=None, runs_per_generator=20, num_trials=80, se
                                      probability_reward=PROBABILITY_REWARD,
                                      reversal_schedule=reversal_schedule)
 
-            # Generate reference logs depending on generator
-            if gen in ('M1', 'M2', 'M3'):
-                value_fn = create_model(gen, A, B, D)
-                runner = AgentRunnerWithLL(A, B, D, value_fn,
-                                           OBSERVATION_HINTS, OBSERVATION_REWARDS,
-                                           OBSERVATION_CHOICES, ACTION_CHOICES,
-                                           reward_mod_idx=1)
-                try:
-                    runner.agent.gamma = 8.0
-                except Exception:
-                    pass
-                ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
+                # Generate reference logs depending on generator
+                if gen in ('M1', 'M2', 'M3'):
+                    value_fn = create_model(gen, A, B, D)
+                    runner = AgentRunnerWithLL(A, B, D, value_fn,
+                                               OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                                               OBSERVATION_CHOICES, ACTION_CHOICES,
+                                               reward_mod_idx=1)
+                    try:
+                        runner.agent.gamma = 8.0
+                    except Exception:
+                        pass
+                    ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
 
-            elif gen in ('egreedy', 'softmax'):
-                ref_logs = simulate_baseline_run(env, policy_type=gen, T=num_trials, seed=run_seed,
-                                                 epsilon=0.1, temp=1.0, alpha=0.1)
-            else:
-                value_fn = create_model('M3', A, B, D)
-                runner = AgentRunnerWithLL(A, B, D, value_fn,
-                                           OBSERVATION_HINTS, OBSERVATION_REWARDS,
-                                           OBSERVATION_CHOICES, ACTION_CHOICES,
-                                           reward_mod_idx=1)
-                ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
+                elif gen in ('egreedy', 'softmax'):
+                    ref_logs = simulate_baseline_run(env, policy_type=gen, T=num_trials, seed=run_seed,
+                                                     epsilon=0.1, temp=1.0, alpha=0.1)
+                else:
+                    value_fn = create_model('M3', A, B, D)
+                    runner = AgentRunnerWithLL(A, B, D, value_fn,
+                                               OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                                               OBSERVATION_CHOICES, ACTION_CHOICES,
+                                               reward_mod_idx=1)
+                    ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
 
-            # Evaluate candidate models on this reference run in parallel
-            ll_by_model = {}
-            future_map = {m: exe.submit(compute_sequence_ll_for_model, m, A, B, D, ref_logs) for m in candidate_models}
-            for m, fut in future_map.items():
-                ll_seq = fut.result()
-                total_ll = float(np.sum(ll_seq))
-                ll_by_model[m] = total_ll
+                # Evaluate candidate models on this reference run in parallel
+                ll_by_model = {}
+                future_map = {m: exe.submit(compute_sequence_ll_for_model_worker, m, ref_logs) for m in candidate_models}
+                for m, fut in future_map.items():
+                    ll_seq = fut.result()
+                    total_ll = float(np.sum(ll_seq))
+                    ll_by_model[m] = total_ll
 
             # Determine winner (highest log-likelihood)
             best_model = max(ll_by_model, key=ll_by_model.get)
@@ -929,33 +962,58 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
 
 
 def _eval_m1_gamma(A, B, D, g_val, ref_logs):
+    # If called with None placeholders, use worker globals initialized via _worker_init
+    if A is None:
+        try:
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            raise RuntimeError("Worker globals not initialized for _eval_m1_gamma")
+    else:
+        A_loc, B_loc, D_loc = A, B, D
     value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=g_val)
-    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
     return total_ll
 
 
 def _eval_m2_params(A, B, D, g_base, k, ref_logs):
+    if A is None:
+        try:
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            raise RuntimeError("Worker globals not initialized for _eval_m2_params")
+    else:
+        A_loc, B_loc, D_loc = A, B, D
+
     def gamma_schedule(q, t, g_base=g_base, k=k):
         p = np.clip(np.asarray(q, float), 1e-12, 1.0)
         H = -(p * np.log(p)).sum()
         return g_base / (1.0 + k * H)
     value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
-    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
     return total_ll
 
 
 def _eval_m3_params(A, B, D, g_val, xi_scale, ref_logs):
-    # build temp agent policies inside worker
-    from pymdp.agent import Agent
-    from pymdp import utils as pymdp_utils
-    C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
-    temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
-                       policy_len=2, inference_horizon=1,
-                       control_fac_idx=[1], use_utility=True,
-                       use_states_info_gain=True,
-                       action_selection="stochastic", gamma=16)
-    policies = temp_agent.policies
-    num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+    # Use precomputed policies if available to avoid expensive agent construction
+    if A is None:
+        try:
+            policies = M3_POLICIES_GLOB
+            num_actions_per_factor = NUM_ACTIONS_PER_FACTOR_GLOB
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            policies = None
+            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+            A_loc, B_loc, D_loc = A, B, D
+    else:
+        policies = None
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        A_loc, B_loc, D_loc = A, B, D
 
     # build scaled profiles
     profiles = []
@@ -966,8 +1024,19 @@ def _eval_m3_params(A, B, D, g_val, xi_scale, ref_logs):
         profiles.append(prof)
 
     value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
-    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
     return total_ll
+
+
+def compute_sequence_ll_for_model_worker(model_name, ref_logs):
+    """Worker wrapper that calls compute_sequence_ll_for_model using globals."""
+    try:
+        A_loc = A_GLOB
+        B_loc = B_GLOB
+        D_loc = D_GLOB
+    except NameError:
+        raise RuntimeError("Worker globals not initialized")
+    return compute_sequence_ll_for_model(model_name, A_loc, B_loc, D_loc, ref_logs)
 
 
 def run_model_recovery_with_fitting(generators=None, runs_per_generator=10, num_trials=80, seed=123, reversal_interval=None):
@@ -990,23 +1059,23 @@ def run_model_recovery_with_fitting(generators=None, runs_per_generator=10, num_
     confusion = {g: {m: 0 for m in candidate_models} for g in generators}
     per_run_rows = []
 
-    # Reuse a process pool for fitting/evaluation
-    max_workers = max(1, os.cpu_count() or 1)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as exe:
+    # Reuse a process pool for fitting/evaluation (workers initialize A/B/D)
+    max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', max(1, os.cpu_count() or 1)))
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
         for gen in generators:
             print(f"\nSimulating generator: {gen}")
             for r in range(runs_per_generator):
                 run_seed = int(seed + r + (abs(hash(gen)) % 1000))
 
-            # Build environment
-            if reversal_interval is not None:
-                reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
-            else:
-                reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
+                # Build environment
+                if reversal_interval is not None:
+                    reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
+                else:
+                    reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
 
-            env = TwoArmedBandit(probability_hint=PROBABILITY_HINT,
-                                 probability_reward=PROBABILITY_REWARD,
-                                 reversal_schedule=reversal_schedule)
+                env = TwoArmedBandit(probability_hint=PROBABILITY_HINT,
+                                     probability_reward=PROBABILITY_REWARD,
+                                     reversal_schedule=reversal_schedule)
 
             # Generate reference logs depending on generator
             if gen in ('M1', 'M2', 'M3'):
@@ -1037,7 +1106,7 @@ def run_model_recovery_with_fitting(generators=None, runs_per_generator=10, num_
 
             # M1 grid: parallel evaluate gamma candidates
             m1_gammas = [1.0, 2.5, 8.0, 16.0]
-            futures = {g: exe.submit(_eval_m1_gamma, A, B, D, g, ref_logs) for g in m1_gammas}
+            futures = {g: exe.submit(_eval_m1_gamma, None, None, None, g, ref_logs) for g in m1_gammas}
             best_ll = -np.inf
             best_g = None
             for g_val, fut in futures.items():
@@ -1052,7 +1121,7 @@ def run_model_recovery_with_fitting(generators=None, runs_per_generator=10, num_
             m2_gamma_bases = [1.0, 2.5, 8.0]
             m2_k = [0.1, 1.0, 4.0]
             param_pairs = [(g_base, k) for g_base in m2_gamma_bases for k in m2_k]
-            futures = {pair: exe.submit(_eval_m2_params, A, B, D, pair[0], pair[1], ref_logs) for pair in param_pairs}
+            futures = {pair: exe.submit(_eval_m2_params, None, None, None, pair[0], pair[1], ref_logs) for pair in param_pairs}
             best_ll = -np.inf
             best_params_m2 = None
             for (g_base, k), fut in futures.items():
@@ -1067,7 +1136,7 @@ def run_model_recovery_with_fitting(generators=None, runs_per_generator=10, num_
             m3_gammas = [1.0, 2.5, 8.0]
             xi_scales = [0.5, 1.0, 2.0]
             param_pairs = [(g, xi) for g in m3_gammas for xi in xi_scales]
-            futures = {pair: exe.submit(_eval_m3_params, A, B, D, pair[0], pair[1], ref_logs) for pair in param_pairs}
+            futures = {pair: exe.submit(_eval_m3_params, None, None, None, pair[0], pair[1], ref_logs) for pair in param_pairs}
             best_ll = -np.inf
             best_params_m3 = None
             for (g_val, xi_scale), fut in futures.items():
