@@ -45,3 +45,8 @@ results/
 *.pth
 *.ckpt
 *.h5
+
+
+# Behavioral data
+behavioral_data/raw_data/
+behavioral_data/derivatives/
