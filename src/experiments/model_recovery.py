@@ -1,10 +1,17 @@
 
-"""K-fold cross-validation for model recovery.
+"""
+Experiment entry point: K-fold cross-validation for model recovery.
 
-Re-simulates the same generators/runs used in the recovery tests, fits each
-model on training folds (grid search over the same small parameter sets),
-evaluates held-out runs, and reports per-model test LL and paired ΔELPD
-with standard errors across folds.
+Overview
+--------
+The script coordinates four stages:
+1. Generate reference trajectories with multiple generators (M1/M2/M3/baselines).
+2. Fit each candidate model on K-1 folds via grid searches (see recovery_helpers).
+3. Evaluate the fitted models on held-out runs via teacher forcing.
+4. Aggregate per-fold log-likelihoods and paired deltas, writing CSV artifacts.
+
+Progress feedback uses nested `tqdm` progress bars: the outer bar tracks folds,
+and inner bars display status for per-model fitting/evaluation.
 """
 import os
 import logging
@@ -18,18 +25,50 @@ from src.utils.recovery_helpers import generate_all_runs, fit_model_on_runs, eva
 from src.utils.ll_eval import evaluate_ll_with_valuefn
 from src.models import make_value_fn
 
-# Using simple print statements for progress feedback
-def _print_info(*args, **kwargs):
-    print("[cv_recovery]", *args, **kwargs)
-
-def _print_debug(*args, **kwargs):
-    print("[cv_recovery DEBUG]", *args, **kwargs)
-
 from config.experiment_config import *
 
 
-def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator=10, num_trials=80, seed=1, reversal_interval=40, K=5):
-    _print_info(f"Generating all reference runs: generators={generators} runs_per_generator={runs_per_generator} num_trials={num_trials} K={K}")
+def kfold_cv(
+    generators=('M1', 'M2', 'M3', 'egreedy', 'softmax'),
+    runs_per_generator=10,
+    num_trials=80,
+    seed=1,
+    reversal_interval=40,
+    K=5,
+):
+    """
+    Perform K-fold cross-validated model recovery.
+
+    Parameters
+    ----------
+    generators : sequence of str
+        Behavioral generators used to produce reference trajectories.
+    runs_per_generator : int
+        Number of independent runs simulated for each generator.
+    num_trials : int
+        Number of bandit trials per run.
+    seed : int
+        Random seed controlling generation and fold shuffling.
+    reversal_interval : int
+        Interval at which latent context reverses; if None, uses default schedule.
+    K : int
+        Number of folds for cross-validation.
+
+    Returns
+    -------
+    results : dict
+        Mapping model name -> {'fold_mean', 'fold_se', 'folds'}
+    diffs : dict
+        Pairwise log-likelihood differences between models with SEs.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Generating reference runs (generators=%s runs_per_generator=%s num_trials=%s K=%s)",
+        generators,
+        runs_per_generator,
+        num_trials,
+        K,
+    )
     A, B, D, refs = generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal_interval)
     N = len(refs)
     idx = np.arange(N)
@@ -37,27 +76,27 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
     rng.shuffle(idx)
     folds = np.array_split(idx, K)
 
-    candidate_models = ['M1','M2','M3']
+    candidate_models = ['M1', 'M2', 'M3']
     per_fold_test_ll = {m: [] for m in candidate_models}
 
-    for k in range(K):
-        _print_info(f"Starting fold {k+1}/{K}: test_size={len(folds[k])}")
+    fold_bar = tqdm(range(K), desc="Folds", unit="fold")
+    for k in fold_bar:
         test_idx = folds[k]
         train_idx = np.hstack([folds[i] for i in range(K) if i != k])
         train_refs = [refs[i]['ref_logs'] for i in train_idx]
         test_refs = [refs[i]['ref_logs'] for i in test_idx]
+        fold_bar.set_postfix(test_size=len(test_idx))
 
-        # Fit each model on training refs
         fitted_params = {}
-        for m in candidate_models:
-            _print_debug(f"Fitting model {m} on {len(train_refs)} training runs")
+        fit_bar = tqdm(candidate_models, desc=f"Fold {k+1} fit", leave=False)
+        for m in fit_bar:
+            fit_bar.set_postfix(model=m)
             fitted_params[m] = fit_model_on_runs(m, A, B, D, train_refs)
-            _print_debug(f"Fitted params for {m}: {fitted_params[m]}")
 
-        # Evaluate on test: compute per-run and per-generator LLs (detailed)
-        test_refs_full = [refs[i] for i in test_idx]  # each has 'gen' and 'ref_logs'
-        for m in candidate_models:
-            _print_debug(f"Evaluating model {m} on {len(test_refs_full)} test runs (detailed)")
+        test_refs_full = [refs[i] for i in test_idx]
+        eval_bar = tqdm(candidate_models, desc=f"Fold {k+1} eval", leave=False)
+        for m in eval_bar:
+            eval_bar.set_postfix(model=m)
 
             # build value function for this model using fitted params
             params = fitted_params[m]
@@ -78,12 +117,14 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
                     params = {}
 
                 if 'gamma' in params and 'xi_scale' in params:
+                    # Legacy format: apply same gamma/scale to all profiles.
                     for p in M3_DEFAULTS['profiles']:
                         prof = dict(p)
                         prof['gamma'] = params['gamma']
                         prof['xi_logits'] = (np.array(p['xi_logits'], float) * params['xi_scale']).tolist()
                         profiles.append(prof)
                 elif 'gamma_profile' in params and 'xi_scales_profile' in params:
+                    # Modern format: per-profile gammas and action-bias scaling.
                     gamma_profile = params['gamma_profile']
                     xi_scales_profile = params['xi_scales_profile']
                     for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
@@ -98,6 +139,7 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
                         prof['xi_logits'] = new_xi.tolist()
                         profiles.append(prof)
                 else:
+                    # Fallback to defaults if params missing.
                     for p in M3_DEFAULTS['profiles']:
                         profiles.append(dict(p))
 
@@ -147,7 +189,7 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
             # append aggregated total LL for compatibility with downstream code
             total_all = sum([r['total_ll'] for r in per_run_records])
             per_fold_test_ll[m].append(total_all)
-            _print_info(f"Fold {k+1}: model {m} test LL = {total_all:.3f}")
+            eval_bar.write(f"[Fold {k+1}] {m} test LL = {total_all:.3f}")
 
         # Save fold checkpoint
         csv_dir = os.path.join('results', 'csv')
@@ -160,7 +202,7 @@ def kfold_cv(generators=['M1','M2','M3','egreedy','softmax'], runs_per_generator
             writer.writerow(header)
             for m in candidate_models:
                 writer.writerow([m, per_fold_test_ll[m][-1]])
-        _print_info(f"Saved fold {k+1} checkpoint: {fold_path}")
+        fold_bar.write(f"Saved fold {k+1} checkpoint: {fold_path}")
 
     # Aggregate and compute ΔELPD-like stats
     results = {}
