@@ -13,6 +13,7 @@ The script coordinates four stages:
 Progress feedback uses nested `tqdm` progress bars: the outer bar tracks folds,
 and inner bars display status for per-model fitting/evaluation.
 """
+import argparse
 import os
 import logging
 import numpy as np
@@ -70,6 +71,7 @@ def kfold_cv(
         K,
     )
     A, B, D, refs = generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal_interval)
+    logger.info(f"Generated {len(refs)} reference runs")
     N = len(refs)
     idx = np.arange(N)
     rng = np.random.RandomState(seed)
@@ -222,8 +224,44 @@ def kfold_cv(
     return results, diffs
 
 
+def _parse_args():
+    """CLI helper so the experiment can be launched directly."""
+    parser = argparse.ArgumentParser(
+        description="Run K-fold model recovery with configurable generators and settings.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--generators",
+        type=str,
+        default="M1,M2,M3,egreedy,softmax",
+        help="Comma-separated list of behavioral generators to simulate.",
+    )
+    parser.add_argument("--runs-per-generator", type=int, default=10, help="Number of runs per generator.")
+    parser.add_argument("--num-trials", type=int, default=80, help="Trials per run.")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed.")
+    parser.add_argument(
+        "--reversal-interval",
+        type=int,
+        default=40,
+        help="Context reversal interval (set <=0 to use default schedule).",
+    )
+    parser.add_argument("--folds", type=int, default=5, help="Number of CV folds (K).")
+    return parser.parse_args()
+
+
 if __name__ == '__main__':
-    res, diffs = kfold_cv()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    args = _parse_args()
+    gens = tuple(g.strip() for g in args.generators.split(",") if g.strip())
+    reversal_interval = args.reversal_interval if args.reversal_interval > 0 else None
+    res, diffs = kfold_cv(
+        generators=gens,
+        runs_per_generator=args.runs_per_generator,
+        num_trials=args.num_trials,
+        seed=args.seed,
+        reversal_interval=reversal_interval,
+        K=args.folds,
+    )
     print("Per-model CV results:")
     for m, v in res.items():
         print(m, v['fold_mean'], v['fold_se'])

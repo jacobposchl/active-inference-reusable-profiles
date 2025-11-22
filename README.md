@@ -30,23 +30,17 @@ reusable_profiles/
 │   │   └── two_armed_bandit.py  # TwoArmedBandit environment class
 │   ├── utils/
 │   │   ├── __init__.py
-│   │   ├── plotting.py          # All visualization functions
-│   │   └── helpers.py           # Helper functions (entropy, rolling mean, etc.)
+│   │   ├── recovery_helpers.py  # Shared CV/grid-search logic + artifact writers
+│   │   └── plotting.py          # Visualization helpers
 │   └── experiments/
 │       ├── __init__.py
-│       ├── run_single_trial.py      # Basic single trial execution
-│       ├── model_comparison.py      # Main model comparison experiments
-│       ├── aic_bic_analysis.py      # Information criteria analysis
-│       ├── noise_robustness.py      # Robustness across environmental noise
-│       ├── precision_dynamics.py    # Mechanistic validation plots
-│       └── parameter_fitting.py     # Subject-level parameter fitting
-├── notebooks/
-│   └── profile_demo.ipynb       # Interactive demonstration notebook
+│       └── model_recovery.py    # K-fold CV experiment and CLI
+├── test_scripts/
+│   └── smoke_cv_demo.py         # Tiny wrapper around the model_recovery CLI
 ├── results/
-│   ├── figures/                 # Generated plots
-│   └── data/                    # Saved experimental data
+│   └── model_recovery/          # Structured outputs (trial/fold/run/confusion)
 └── tests/
-    └── __init__.py              # Unit tests (to be implemented)
+    └── ...                      # Pytest suites for env/models/experiments
 ```
 
 ## Installation
@@ -60,36 +54,49 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Quick Start
+### Model Recovery (Main Experiment)
 
-Run a basic model comparison:
+Launch the cross-validated recovery study via the CLI:
 
-```python
-from src.experiments.model_comparison import run_full_comparison
-
-# Run comparison with 20 seeds
-results, analysis_ll, analysis_acc = run_full_comparison(
-    n_seeds=20,
-    trials=200,
-    reversal_schedule=[30, 60, 90, 120, 150, 180]
-)
+```bash
+python src/experiments/model_recovery.py \
+  --generators M1,M2,M3,egreedy,softmax \
+  --runs-per-generator 20 \
+  --num-trials 80 \
+  --seed 1 \
+  --reversal-interval 40 \
+  --folds 5
 ```
 
-### Run Individual Experiments
+All arguments have sensible defaults; run `--help` for details. The script prints
+progress with nested `tqdm` bars and writes structured outputs to
+`results/model_recovery/`.
 
-```python
-# AIC/BIC comparison
-from src.experiments.aic_bic_analysis import run_aic_bic_comparison
-results, model_params = run_aic_bic_comparison(n_seeds=20, trials=200)
+### Smoke Test
 
-# Noise robustness test
-from src.experiments.noise_robustness import run_noise_robustness_test
-results_noise = run_noise_robustness_test(n_seeds=15, trials=200)
+Before running the full study you can execute a lightweight sanity check:
 
-# Precision dynamics analysis
-from src.experiments.precision_dynamics import run_precision_dynamics_comparison
-trajectories = run_precision_dynamics_comparison(seed=42, trials=200)
+```bash
+python test_scripts/smoke_cv_demo.py
 ```
+
+This invokes the same CLI with a tiny configuration (two generators, single run)
+to confirm dependencies and logging work end-to-end.
+
+### Output Layout
+
+After a run you will find:
+
+- `results/model_recovery/trial_level/…` – per-trial CSVs including fold/train/test
+  labels, beliefs, gamma, and action log-likelihoods.
+- `results/model_recovery/fold_level/…` – fold summaries with train/test indices,
+  best parameters, and grid-eval counts.
+- `results/model_recovery/run_summary/…` – per-run aggregates (mean LL/accuracy,
+  runtime, parameter snapshots).
+- `results/model_recovery/confusion/…` – confusion matrices for log-likelihood,
+  accuracy, AIC, and BIC (means + standard errors).
+- `results/model_recovery/metadata/experiment_summary.json` – metadata describing
+  generators, seeds, fold count, and environment settings used in the run.
 
 ## Key Concepts
 
@@ -126,6 +133,16 @@ Profiles are combined via:
 w = q(context) @ Z  # Profile weights from beliefs
 C_t = softmax(w @ PHI)  # Mixed outcome preferences
 gamma_t = w @ GAMMA  # Mixed precision
+```
+
+## Tests
+
+The repository includes pytest coverage for the environment, generative model,
+value functions, agent wrapper, log-likelihood utilities, recovery helpers, and
+the top-level `model_recovery` experiment. Run the suite with:
+
+```bash
+pytest
 ```
 
 ## Citation
