@@ -64,6 +64,43 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
     return float(np.sum(ll_seq)), ll_seq
 
 
+def evaluate_ll_with_valuefn_masked(value_fn, A, B, D, ref_logs, mask_indices):
+    """Compute masked total log-likelihood over a subset of trials.
+
+    Runs the model forward over the full trial sequence (so internal
+    agent state updates match the original run), returns the full per-trial
+    log-likelihood sequence and the sum over `mask_indices`.
+
+    Parameters:
+    -----------
+    value_fn : callable
+        Value function factory for the model (q_context, t) -> (C_t, E_t, gamma_t)
+    A, B, D : arrays
+        Generative model components (passed to agent)
+    ref_logs : dict
+        Reference run logs with keys including 'action', 'reward_label',
+        'hint_label', 'choice_label'.
+    mask_indices : sequence of int
+        Trial indices to include in the summed log-likelihood.
+
+    Returns:
+    --------
+    total_masked : float
+        Sum of per-trial log-likelihoods over mask_indices
+    ll_seq : list of float
+        Full per-trial log-likelihood sequence
+    """
+    total, ll_seq = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    mask_set = set(int(i) for i in (mask_indices or []))
+    if not mask_set:
+        return 0.0, ll_seq
+    masked_sum = 0.0
+    for idx, ll in enumerate(ll_seq):
+        if idx in mask_set:
+            masked_sum += float(ll)
+    return float(masked_sum), ll_seq
+
+
 # Worker helpers for optional parallel evaluation. These reuse globals initialized
 # by _worker_init to avoid pickling large A/B/D objects repeatedly.
 
@@ -114,6 +151,23 @@ def _eval_m1_gamma(A, B, D, g_val, ref_logs):
     return total_ll
 
 
+def _eval_m1_gamma_masked(A, B, D, g_val, ref_logs, mask_indices):
+    """Worker helper: evaluate M1 gamma on masked trials (sum over mask_indices)."""
+    if A is None:
+        try:
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            raise RuntimeError("Worker globals not initialized for _eval_m1_gamma_masked")
+    else:
+        A_loc, B_loc, D_loc = A, B, D
+
+    value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=g_val)
+    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
+    return total_ll
+
+
 def _eval_m2_params(A, B, D, g_base, k, ref_logs):
     if A is None:
         try:
@@ -131,6 +185,27 @@ def _eval_m2_params(A, B, D, g_base, k, ref_logs):
         return g_base / (1.0 + k * H)
     value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
     total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return total_ll
+
+
+def _eval_m2_params_masked(A, B, D, g_base, k, ref_logs, mask_indices):
+    if A is None:
+        try:
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            raise RuntimeError("Worker globals not initialized for _eval_m2_params_masked")
+    else:
+        A_loc, B_loc, D_loc = A, B, D
+
+    def gamma_schedule(q, t, g_base=g_base, k=k):
+        p = np.clip(np.asarray(q, float), 1e-12, 1.0)
+        H = -(p * np.log(p)).sum()
+        return g_base / (1.0 + k * H)
+
+    value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
+    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
     return total_ll
 
 
@@ -160,6 +235,35 @@ def _eval_m3_params(A, B, D, g_val, xi_scale, ref_logs):
 
     value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
     total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return total_ll
+
+
+def _eval_m3_params_masked(A, B, D, g_val, xi_scale, ref_logs, mask_indices):
+    if A is None:
+        try:
+            policies = M3_POLICIES_GLOB
+            num_actions_per_factor = NUM_ACTIONS_PER_FACTOR_GLOB
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            policies = None
+            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+            A_loc, B_loc, D_loc = A, B, D
+    else:
+        policies = None
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        A_loc, B_loc, D_loc = A, B, D
+
+    profiles = []
+    for p in M3_DEFAULTS['profiles']:
+        prof = dict(p)
+        prof['gamma'] = g_val
+        prof['xi_logits'] = (np.array(p['xi_logits'], float) * xi_scale).tolist()
+        profiles.append(prof)
+
+    value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
+    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
     return total_ll
 
 
@@ -204,4 +308,39 @@ def _eval_m3_params_per_profile(A, B, D, gammas, xi_scales_profile, ref_logs):
 
     value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
     total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return total_ll
+
+
+def _eval_m3_params_per_profile_masked(A, B, D, gammas, xi_scales_profile, ref_logs, mask_indices):
+    if A is None:
+        try:
+            policies = M3_POLICIES_GLOB
+            num_actions_per_factor = NUM_ACTIONS_PER_FACTOR_GLOB
+            A_loc = A_GLOB
+            B_loc = B_GLOB
+            D_loc = D_GLOB
+        except NameError:
+            policies = None
+            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+            A_loc, B_loc, D_loc = A, B, D
+    else:
+        policies = None
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        A_loc, B_loc, D_loc = A, B, D
+
+    profiles = []
+    for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
+        prof = dict(p)
+        prof['gamma'] = float(gammas[p_idx])
+        orig_xi = np.array(p['xi_logits'], float)
+        scales3 = xi_scales_profile[p_idx]
+        new_xi = orig_xi.copy()
+        new_xi[1] = orig_xi[1] * float(scales3[0])
+        new_xi[2] = orig_xi[2] * float(scales3[1])
+        new_xi[3] = orig_xi[3] * float(scales3[2])
+        prof['xi_logits'] = new_xi.tolist()
+        profiles.append(prof)
+
+    value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
+    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
     return total_ll
