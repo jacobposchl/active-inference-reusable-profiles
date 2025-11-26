@@ -46,15 +46,18 @@ def create_model(model_name, A, B, D):
 
 
 def get_num_parameters(model_name):
-    """Get number of free parameters for each model."""
+    """Get number of free parameters for each model (actually optimized in grid search).
+    
+    Note: This counts only parameters that are fitted during recovery, not fixed defaults.
+    """
     if model_name == 'M1':
-        return 3
+        return 1  # gamma only (C_reward_logits are fixed)
         
     elif model_name == 'M2':
-        return 4
+        return 2  # gamma_base and entropy_k (C_reward_logits are fixed)
         
     elif model_name == 'M3':
-        return 14
+        return 4  # gamma_p0, gamma_p1, hint_scale, arm_scale (phi_logits fixed, xi scales shared)
     return 0
 
 

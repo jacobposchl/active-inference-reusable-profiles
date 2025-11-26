@@ -333,6 +333,7 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
     logs = {
         't': [],
         'context': [],
+        'current_better_arm': [],  # NEW: Track which arm is actually better
         'belief': [],
         'gamma': [],
         'action': [],
@@ -357,6 +358,8 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         # Log data
         logs['t'].append(t)
         logs['context'].append(env.context)
+        # NEW: Log which arm is currently better (for volatile/stable contexts)
+        logs['current_better_arm'].append(getattr(env, 'current_better_arm', None))
         logs['belief'].append(qs[0].copy())
         logs['gamma'].append(gamma_t)
         logs['action'].append(action_label)

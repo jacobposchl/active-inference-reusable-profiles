@@ -125,10 +125,19 @@ def _write_dict_csv(path, fieldnames, rows, mode='w'):
 
 
 def build_abd():
-    """Build and return (A, B, D) using config constants."""
+    """Build and return (A, B, D) using config constants.
+    
+    Note: With the new volatile/stable contexts, the agent's A matrix represents
+    beliefs about observation likelihoods. We use average reward probabilities
+    since the agent doesn't know the exact probabilities in each context a priori.
+    """
+    # Use average reward probability for agent's beliefs
+    # Agent learns the actual probabilities through experience
+    avg_reward_prob = 0.80  # Reasonable middle ground between contexts
+    
     A = build_A(NUM_MODALITIES, STATE_CONTEXTS, STATE_CHOICES,
                OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
-               PROBABILITY_HINT, PROBABILITY_REWARD)
+               PROBABILITY_HINT, avg_reward_prob)
     B = build_B(STATE_CONTEXTS, STATE_CHOICES, ACTION_CONTEXTS, ACTION_CHOICES,
                context_volatility=DEFAULT_CONTEXT_VOLATILITY)
     D = build_D(STATE_CONTEXTS, STATE_CHOICES)
@@ -152,8 +161,14 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
             else:
                 reversal_schedule = DEFAULT_REVERSAL_SCHEDULE
 
+            # Create environment with new volatile/stable parameters
             env = TwoArmedBandit(
-                probability_hint=PROBABILITY_HINT, probability_reward=PROBABILITY_REWARD,
+                probability_hint=PROBABILITY_HINT,
+                volatile_reward_better=VOLATILE_REWARD_BETTER,
+                volatile_reward_worse=VOLATILE_REWARD_WORSE,
+                stable_reward_better=STABLE_REWARD_BETTER,
+                stable_reward_worse=STABLE_REWARD_WORSE,
+                volatile_switch_interval=VOLATILE_SWITCH_INTERVAL,
                 reversal_schedule=reversal_schedule
             )
 
@@ -165,10 +180,6 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
                     OBSERVATION_CHOICES, ACTION_CHOICES,
                     reward_mod_idx=1
                 )
-                try:
-                    runner.agent.gamma = 8.0
-                except Exception as e:
-                    logging.warning("Could not configure runner.agent for %s generator: %s", gen, e)
                 ref_logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
 
             elif gen in ('egreedy', 'softmax'):
@@ -389,28 +400,35 @@ def fit_model_on_runs(model_name, A, B, D, ref_logs_list, save_grid=False, save_
                     w.writerow([gb, kk, vv])
 
     elif model_name == 'M3':
-        # More flexible M3 grid search: allow per-profile gammas and per-profile
-        # xi scaling for the non-start actions (hint, left, right). This keeps
-        # the search expressive while remaining manageable.
+        # SMART CONSTRAINED SEARCH: Exploit M3's symmetric profile structure
+        # Assumption: Xi scales are symmetric (same magnitude, opposite signs for arms)
+        # Allows: Independent gamma per profile (no assumption of equal precision)
+        # This reduces search space from 6,561 to 108 candidates.
         policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
 
-        # Grid definitions (expandable)
-        gamma_vals = [1.0, 2.5, 8.0]
-        xi_scale_values = [0.5, 1.0, 2.0]
-
-        # For each profile we'll search independent gammas and xi scales for
-        # the three actionable indices (skip the 'start' action at idx 0).
+        # Grid definitions
+        gamma_vals = [1.0, 2.5, 5.0]  # Each profile can have different gamma
+        xi_scale_hint = [0.5, 1.0, 2.0, 4.0]  # Hint scale (symmetric across profiles)
+        xi_scale_arm = [0.5, 1.0, 2.0]  # Arm bias magnitude (symmetric)
+        
         from itertools import product
-
         num_profiles = len(M3_DEFAULTS['profiles'])
 
-        # Parallel coarse evaluation across candidate combinations using worker helper
-        per_profile_xi_combos = list(product(xi_scale_values, repeat=3))
-        # Build list of all candidate combinations (may be large)
+        # Build constrained candidates with symmetric xi but independent gammas
         candidates = []
-        for gammas in product(gamma_vals, repeat=num_profiles):
-            for xi_combo_all in product(per_profile_xi_combos, repeat=num_profiles):
-                candidates.append((list(gammas), [list(x) for x in xi_combo_all]))
+        for gamma_p0 in gamma_vals:
+            for gamma_p1 in gamma_vals:
+                for hint_scale in xi_scale_hint:
+                    for arm_scale in xi_scale_arm:
+                        # Allow different gamma per profile
+                        gammas = [gamma_p0, gamma_p1]
+                        
+                        # Symmetric xi scaling across profiles
+                        xi_scales = [
+                            [hint_scale, arm_scale, arm_scale],  # Profile 0
+                            [hint_scale, arm_scale, arm_scale]   # Profile 1
+                        ]
+                        candidates.append((gammas, xi_scales))
 
         # Evaluate each candidate across all training refs in parallel
         max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
@@ -507,8 +525,19 @@ def cv_fit_single_run(
     trial_rows_all = []
     total_grid_evals = 0
     run_start = time.time()
+    
+    # Import tqdm for fold progress (optional, graceful fallback)
+    try:
+        from tqdm import tqdm as _tqdm
+        use_progress = True
+    except ImportError:
+        use_progress = False
 
-    for k in range(K):
+    fold_iter = range(K)
+    if use_progress and K > 1:
+        fold_iter = _tqdm(fold_iter, desc=f"    ├─ Folds ({model_name})", leave=False, position=2)
+
+    for k in fold_iter:
         test_idx = [int(i) for i in folds[k]]
         test_idx_set = set(test_idx)
         train_idx = [int(i) for i in idx if int(i) not in test_idx_set]
@@ -693,53 +722,68 @@ def cv_fit_single_run(
 
         elif model_name == 'M3':
             policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
-            gamma_vals = [1.0, 2.5, 8.0]
-            xi_scale_values = [0.5, 1.0, 2.0]
+            # SMART CONSTRAINED SEARCH (same as non-CV version)
+            gamma_vals = [1.0, 2.5, 5.0]
+            xi_scale_hint = [0.5, 1.0, 2.0, 4.0]  # Expanded to include 4.0
+            xi_scale_arm = [0.5, 1.0, 2.0]  # Removed 4.0
+            
             from itertools import product
-
-            per_profile_xi_combos = list(product(xi_scale_values, repeat=3))
             num_profiles = len(M3_DEFAULTS['profiles'])
+            
             candidates = []
-            for gammas in product(gamma_vals, repeat=num_profiles):
-                for xi_combo_all in product(per_profile_xi_combos, repeat=num_profiles):
-                    candidates.append((list(gammas), [list(x) for x in xi_combo_all]))
+            for gamma_p0 in gamma_vals:
+                for gamma_p1 in gamma_vals:
+                    for hint_scale in xi_scale_hint:
+                        for arm_scale in xi_scale_arm:
+                            gammas = [gamma_p0, gamma_p1]
+                            xi_scales = [
+                                [hint_scale, arm_scale, arm_scale],
+                                [hint_scale, arm_scale, arm_scale]
+                            ]
+                            candidates.append((list(gammas), xi_scales))
 
-            for gammas_c, xi_scales_c in candidates:
-                fold_grid_evals += 1
-                profiles = []
-                for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
-                    prof = dict(p)
-                    prof['gamma'] = float(gammas_c[p_idx])
-                    orig_xi = np.array(p['xi_logits'], float)
-                    scales3 = xi_scales_c[p_idx]
-                    new_xi = orig_xi.copy()
-                    new_xi[1] = orig_xi[1] * float(scales3[0])
-                    new_xi[2] = orig_xi[2] * float(scales3[1])
-                    new_xi[3] = orig_xi[3] * float(scales3[2])
-                    prof['xi_logits'] = new_xi.tolist()
-                    profiles.append(prof)
-
-                value_fn = make_value_fn(
-                    'M3',
-                    profiles=profiles,
-                    Z=np.array(M3_DEFAULTS['Z']),
-                    policies=policies,
-                    num_actions_per_factor=num_actions_per_factor,
-                )
-                tr_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A, B, D, ref_logs, train_idx)
-                if record_grid:
-                    fold_grid_records.append(
-                        {
-                            'fold': k,
-                            'stage': 'grid',
-                            'gamma_profile': json.dumps(gammas_c),
-                            'xi_scales': json.dumps(xi_scales_c),
-                            'll': float(tr_ll),
-                        }
+            # Parallelize M3 grid evaluation across workers
+            max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
+            candidate_scores = {}
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)
+            ) as exe:
+                fut_map = {}
+                for gammas_c, xi_scales_c in candidates:
+                    fold_grid_evals += 1
+                    fut = exe.submit(
+                        _eval_m3_params_per_profile_masked,
+                        None, None, None,
+                        gammas_c,
+                        xi_scales_c,
+                        ref_logs,
+                        train_idx
                     )
-                if tr_ll > best_ll:
-                    best_ll = tr_ll
-                    best_params = {'gamma_profile': list(gammas_c), 'xi_scales_profile': xi_scales_c}
+                    fut_map[fut] = (gammas_c, xi_scales_c)
+                
+                for fut in concurrent.futures.as_completed(fut_map):
+                    gammas_c, xi_scales_c = fut_map[fut]
+                    try:
+                        tr_ll = fut.result()
+                    except Exception:
+                        tr_ll = -np.inf
+                    
+                    candidate_scores[(tuple(gammas_c), tuple(tuple(x) for x in xi_scales_c))] = float(tr_ll)
+                    
+                    if record_grid:
+                        fold_grid_records.append(
+                            {
+                                'fold': k,
+                                'stage': 'grid',
+                                'gamma_profile': json.dumps(gammas_c),
+                                'xi_scales': json.dumps(xi_scales_c),
+                                'll': float(tr_ll),
+                            }
+                        )
+                    
+                    if tr_ll > best_ll:
+                        best_ll = tr_ll
+                        best_params = {'gamma_profile': list(gammas_c), 'xi_scales_profile': xi_scales_c}
 
         else:
             raise ValueError(f"Unknown model for CV: {model_name}")
@@ -1054,14 +1098,27 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         # log-likelihood for this trial (log prob assigned to the taken action)
         ll_t = np.log(gen_action_prob + 1e-16)
 
-        # accuracy: whether predicted action is the optimal action given true context
-        true_context = ref_logs['context'][t]
-        if true_context == 'left_better':
-            acc = 1 if ('left' in pred_action) else 0
-        elif true_context == 'right_better':
-            acc = 1 if ('right' in pred_action) else 0
+        # accuracy: whether predicted action chooses the currently better arm
+        # For volatile/stable contexts, we need to know which arm is actually better
+        current_better_arm = ref_logs.get('current_better_arm', [None]*T)[t]
+        
+        if current_better_arm is not None:
+            # New volatile/stable task: check against current_better_arm
+            if current_better_arm == 'left':
+                acc = 1 if ('left' in pred_action) else 0
+            elif current_better_arm == 'right':
+                acc = 1 if ('right' in pred_action) else 0
+            else:
+                acc = 0
         else:
-            acc = 0
+            # Fallback for old left_better/right_better task
+            true_context = ref_logs['context'][t]
+            if true_context == 'left_better':
+                acc = 1 if ('left' in pred_action) else 0
+            elif true_context == 'right_better':
+                acc = 1 if ('right' in pred_action) else 0
+            else:
+                acc = 0
 
         # flags
         is_reversal = int(t in reversals)

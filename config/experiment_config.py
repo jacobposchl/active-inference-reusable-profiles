@@ -3,7 +3,10 @@ Global configuration parameters for all experiments.
 """
 
 # Task dimensionalities
-STATE_CONTEXTS = ['left_better', 'right_better']
+# NEW: Contexts now represent volatility regimes, not which arm is better
+# - 'volatile': Arms switch which is better every 10 trials (need frequent info-seeking)
+# - 'stable': Arms stay fixed for long periods (exploit after initial learning)
+STATE_CONTEXTS = ['volatile', 'stable']
 STATE_CHOICES = ['start', 'hint', 'left', 'right']
 
 ACTION_CONTEXTS = ['rest']
@@ -22,8 +25,17 @@ NUM_FACTORS = len(NUM_STATES)
 NUM_MODALITIES = len(NUM_OBS)
 
 # Environment parameters (generative process)
-PROBABILITY_HINT = 0.85 # percent chance of correct hint (which arm is better) --- this create observation noise
-PROBABILITY_REWARD = 0.85 # percent chance of reward when choosing better arm. --- this creates outcome noise
+PROBABILITY_HINT = 0.85  # Hint accuracy (same for both contexts)
+
+# Reward probabilities differ by context to create different optimal strategies
+# Volatile context: moderate discrimination (70% vs 30%) + frequent switches
+VOLATILE_REWARD_BETTER = 0.70  # Better arm in volatile context
+VOLATILE_REWARD_WORSE = 0.30   # Worse arm in volatile context
+VOLATILE_SWITCH_INTERVAL = 10  # Arms switch every 10 trials
+
+# Stable context: strong discrimination (90% vs 10%) + rare switches
+STABLE_REWARD_BETTER = 0.90    # Better arm in stable context
+STABLE_REWARD_WORSE = 0.10     # Worse arm in stable context
 
 # Default experiment parameters
 DEFAULT_TRIALS = 800
@@ -54,22 +66,24 @@ M2_DEFAULTS = {
 M3_DEFAULTS = {
     'profiles': [
         {   
-            # PROFILE 0: For left_better context - exploitative
+            # PROFILE 0: For VOLATILE context - Information-seeking, exploratory
+            # Strategy: Arms switch frequently, so KEEP CHECKING HINTS and EXPLORE
             # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-            'phi_logits': [0.0, -5.0, 5.0], # Strong outcome preferences
+            'phi_logits': [0.0, -5.0, 5.0],  # Strong outcome preferences (same as others)
             # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
-            'xi_logits': [0.0, 1.0, 4.0, -4.0], # Neutral on actions
-            'gamma': 2.5 # Moderate-high precision
+            'xi_logits': [0.0, 3.0, 0.0, 0.0],  # HIGH preference for hints (3.0), neutral on arms
+            'gamma': 2.0  # LOWER precision (more exploratory, less committed)
         },
         {
-            # PROFILE 1: For right_better context - exploitative
+            # PROFILE 1: For STABLE context - Exploitative, decisive
+            # Strategy: Arms stay fixed, so CHECK HINT ONCE then EXPLOIT with confidence
             # OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
-            'phi_logits': [0.0, -5.0, 5.0], # Strong outcome preferences
+            'phi_logits': [0.0, -5.0, 5.0],  # Strong outcome preferences (same as others)
             # ACTION_CHOICE = ['act_start', 'act_hint', 'act_left', 'act_right']
-            'xi_logits': [0.0, 1.0, -4.0, 4.0], # Neutral on actions
-            'gamma': 2.5 # Moderate-high precision
+            'xi_logits': [0.0, 0.5, 0.0, 0.0],  # LOW preference for hints (0.5), mostly rely on direct sampling
+            'gamma': 4.0  # HIGHER precision (more exploitative, commit to best arm)
         }
     ],
-    'Z': [[1.0, 0.0], # When context = left_better -> use Profile 0
-          [0.0, 1.0]] # When context = right_better -> use Profile 1
+    'Z': [[1.0, 0.0],  # When context = volatile -> use Profile 0 (info-seeking)
+          [0.0, 1.0]]  # When context = stable -> use Profile 1 (exploitative)
 }
