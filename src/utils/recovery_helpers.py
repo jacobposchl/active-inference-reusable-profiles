@@ -127,20 +127,34 @@ def _write_dict_csv(path, fieldnames, rows, mode='w'):
 def build_abd():
     """Build and return (A, B, D) using config constants.
     
-    Note: With the new volatile/stable contexts, the agent's A matrix represents
-    beliefs about observation likelihoods. We use average reward probabilities
-    since the agent doesn't know the exact probabilities in each context a priori.
-    """
-    # Use average reward probability for agent's beliefs
-    # Agent learns the actual probabilities through experience
-    avg_reward_prob = 0.80  # Reasonable middle ground between contexts
+    Now uses 3 state factors:
+    - context (volatile/stable)
+    - better_arm (left_better/right_better) 
+    - choice (start/hint/left/right)
     
-    A = build_A(NUM_MODALITIES, STATE_CONTEXTS, STATE_CHOICES,
-               OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
-               PROBABILITY_HINT, avg_reward_prob)
-    B = build_B(STATE_CONTEXTS, STATE_CHOICES, ACTION_CONTEXTS, ACTION_CHOICES,
-               context_volatility=DEFAULT_CONTEXT_VOLATILITY)
-    D = build_D(STATE_CONTEXTS, STATE_CHOICES)
+    And 4 observation modalities:
+    - hints (reveal which arm is better)
+    - rewards (outcome of arm choice)
+    - choices (observe own action)
+    - contexts (DIRECT CUE - agent is TOLD which context it's in)
+    
+    Context is directly observable via the 4th modality, so the agent
+    always knows if it's in volatile or stable mode and can adapt
+    its strategy accordingly (M3 profile mixing).
+    """
+    # Average reward probability for agent's beliefs
+    avg_reward_prob = 0.80
+    
+    A = build_A(NUM_MODALITIES, 
+                STATE_CONTEXTS, STATE_BETTER_ARM, STATE_CHOICES,
+                OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
+                OBSERVATION_CONTEXTS,  # NEW: direct context observation
+                p_hint=PROBABILITY_HINT,
+                p_reward=avg_reward_prob)
+    B = build_B(STATE_CONTEXTS, STATE_BETTER_ARM, STATE_CHOICES, 
+                ACTION_CONTEXTS, ACTION_BETTER_ARM, ACTION_CHOICES,
+                context_volatility=DEFAULT_CONTEXT_VOLATILITY)
+    D = build_D(STATE_CONTEXTS, STATE_BETTER_ARM, STATE_CHOICES)
     return A, B, D
 
 
@@ -201,20 +215,24 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
 
 
 def _make_temp_agent_and_policies(A, B, D):
-    """Create a temporary pymdp Agent to extract policies for M3 value function."""
-    # Import pymdp lazily so this module can be imported in environments
-    # without pymdp (tests that only check imports should not require it).
+    """Create a temporary pymdp Agent to extract policies for M3 value function.
+    
+    With 3 state factors: [context, better_arm, choice]
+    Only choice (index 2) is controllable.
+    """
     from pymdp.agent import Agent
     from pymdp import utils as pymdp_utils
 
     C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
     temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
                       policy_len=2, inference_horizon=1,
-                      control_fac_idx=[1], use_utility=True,
+                      control_fac_idx=[2],  # Choice is factor 2 in 3-factor model
+                      use_utility=True,
                       use_states_info_gain=True,
                       action_selection="stochastic", gamma=16)
     policies = temp_agent.policies
-    num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+    # 3 action factors: [context_action, better_arm_action, choice_action]
+    num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
     return policies, num_actions_per_factor
 
 
@@ -541,6 +559,10 @@ def cv_fit_single_run(
         test_idx = [int(i) for i in folds[k]]
         test_idx_set = set(test_idx)
         train_idx = [int(i) for i in idx if int(i) not in test_idx_set]
+        
+        # Special case: K=1 means no cross-validation, use all data for both train and test
+        if K == 1 or len(train_idx) == 0:
+            train_idx = list(range(N))
         best_ll = -np.inf
         best_params = None
         fold_grid_records = []
@@ -798,11 +820,9 @@ def cv_fit_single_run(
                     'M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=best_params['gamma']
                 )
             elif model_name == 'M2':
-
-                def gamma_schedule(q, t, g_base=best_params['gamma_base'], k=best_params['entropy_k']):
-                    p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-                    H = -(p * np.log(p)).sum()
-                    return g_base / (1.0 + k * H)
+                # gamma_schedule receives H (entropy of better_arm beliefs) directly
+                def gamma_schedule(H_better_arm, t, g_base=best_params['gamma_base'], k=best_params['entropy_k']):
+                    return g_base / (1.0 + k * H_better_arm)
 
                 value_fn_best = make_value_fn(
                     'M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule
@@ -1053,7 +1073,8 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
     reversals = set(find_reversals(ref_logs['context']))
 
     # initial observation
-    initial_obs_labels = ['null', 'null', 'observe_start']
+    # 4 observations: hint, reward, choice, context
+    initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
 
     for t in range(T):
@@ -1061,8 +1082,8 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         qs = runner.agent.infer_states(obs_ids)
         q_context = qs[0].copy()
 
-        # Update value_fn derived params for this trial
-        C_t, E_t, gamma_t = value_fn(q_context, t)
+        # Update value_fn derived params for this trial (pass full beliefs)
+        C_t, E_t, gamma_t = value_fn(qs, t)
         runner.agent.C[1] = C_t
         if E_t is not None and len(E_t) == len(runner.agent.policies):
             runner.agent.E = E_t
@@ -1072,11 +1093,11 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         q_pi, efe = runner.agent.infer_policies()
 
         # Compute action probabilities by summing q_pi over policies whose
-        # first action for choice factor matches each action index
+        # first action for choice factor (index 2) matches each action index
         num_actions = len(ACTION_CHOICES)
         action_probs = np.zeros(num_actions)
         for pi_idx, policy in enumerate(runner.agent.policies):
-            a_idx = int(policy[0, 1])
+            a_idx = int(policy[0, 2])  # Choice action at index 2
             action_probs[a_idx] += float(q_pi[pi_idx])
 
         # Normalize (should already sum to 1)
@@ -1098,6 +1119,9 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         # log-likelihood for this trial (log prob assigned to the taken action)
         ll_t = np.log(gen_action_prob + 1e-16)
 
+        # Get true context (always needed for logging)
+        true_context = ref_logs['context'][t]
+        
         # accuracy: whether predicted action chooses the currently better arm
         # For volatile/stable contexts, we need to know which arm is actually better
         current_better_arm = ref_logs.get('current_better_arm', [None]*T)[t]
@@ -1112,7 +1136,6 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
                 acc = 0
         else:
             # Fallback for old left_better/right_better task
-            true_context = ref_logs['context'][t]
             if true_context == 'left_better':
                 acc = 1 if ('left' in pred_action) else 0
             elif true_context == 'right_better':
@@ -1147,11 +1170,21 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
 
         rows.append(row)
 
+        # CRITICAL: Set the agent's action so beliefs propagate correctly through B
+        # We use the GENERATOR's actual action (teacher forcing)
+        if gen_a_idx is not None:
+            # Create action array for all factors: [context_action, better_arm_action, choice_action]
+            # Only choice (index 2) is controllable, others are 'rest' (index 0)
+            runner.agent.action = np.array([0, 0, gen_a_idx])
+
         # advance obs to next trial using generator's recorded obs
+        # Construct context observation from context field
+        context_obs = f"observe_{ref_logs['context'][t]}" if 'context' in ref_logs else 'observe_volatile'
+        
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
-            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
         else:
-            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
         obs_ids = runner.obs_labels_to_ids(next_obs)
 
     return rows
@@ -1221,10 +1254,9 @@ def evaluate_on_test(model_name, A, B, D, params, ref_logs_list):
     if model_name == 'M1':
         value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=params['gamma'])
     elif model_name == 'M2':
-        def gamma_schedule(q, t, g_base=params['gamma_base'], k=params['entropy_k']):
-            p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-            H = -(p * np.log(p)).sum()
-            return g_base / (1.0 + k * H)
+        # gamma_schedule receives H (entropy of better_arm beliefs) directly
+        def gamma_schedule(H_better_arm, t, g_base=params['gamma_base'], k=params['entropy_k']):
+            return g_base / (1.0 + k * H_better_arm)
         value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
     else:
         policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)

@@ -13,8 +13,8 @@ class AgentRunner:
     """
     
     def __init__(self, A, B, D, value_fn, observation_hints, observation_rewards,
-                 observation_choices, action_choices, reward_mod_idx=1,
-                 policy_len=2, inference_horizon=1):
+                 observation_choices, action_choices, observation_contexts=None,
+                 reward_mod_idx=1, policy_len=2, inference_horizon=1):
         """
         Initialize agent runner.
         
@@ -36,6 +36,9 @@ class AgentRunner:
             Choice observation labels
         action_choices : list
             Choice action labels
+        observation_contexts : list or None
+            Context observation labels (e.g., ['observe_volatile', 'observe_stable'])
+            If None, uses default from config
         reward_mod_idx : int
             Index of reward modality for C vector
         policy_len : int
@@ -53,17 +56,25 @@ class AgentRunner:
         self.action_choices = action_choices
         self.policy_len = policy_len
         
+        # Handle context observations (4th modality for direct context cue)
+        if observation_contexts is None:
+            from config.experiment_config import OBSERVATION_CONTEXTS
+            observation_contexts = OBSERVATION_CONTEXTS
+        self.observation_contexts = observation_contexts
+        
         self.gamma_t = None
         
         # Initialize C vector (will be updated each trial)
         C0 = utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
         
         # Create pymdp Agent
+        # With 3 state factors: [context, better_arm, choice]
+        # Only choice (index 2) is controllable
         self.agent = Agent(
             A=A, B=B, C=C0, D=D,
             policy_len=policy_len,
             inference_horizon=inference_horizon,
-            control_fac_idx=[1],  # Only control choice factor
+            control_fac_idx=[2],  # Only control choice factor (now at index 2)
             use_utility=True,
             use_states_info_gain=True,
             action_selection="stochastic",
@@ -71,16 +82,27 @@ class AgentRunner:
         )
     
     def obs_labels_to_ids(self, obs_labels):
-        """Convert observation strings to indices."""
-        return [
+        """Convert observation strings to indices.
+        
+        Handles both 3-obs (old) and 4-obs (with context) formats.
+        """
+        ids = [
             self.observation_hints.index(obs_labels[0]),
             self.observation_rewards.index(obs_labels[1]),
             self.observation_choices.index(obs_labels[2])
         ]
+        # Add context observation if provided (4th modality)
+        if len(obs_labels) > 3:
+            ids.append(self.observation_contexts.index(obs_labels[3]))
+        return ids
     
     def action_id_to_label(self, chosen_action_ids):
-        """Convert action index to string label."""
-        a_idx = int(chosen_action_ids[1])
+        """Convert action index to string label.
+        
+        With 3 action factors: [context_action, better_arm_action, choice_action]
+        We only care about the choice_action at index 2.
+        """
+        a_idx = int(chosen_action_ids[2])  # Choice action is at index 2
         return self.action_choices[a_idx]
     
     def step(self, obs_ids, t):
@@ -111,11 +133,8 @@ class AgentRunner:
         # Infer hidden states
         qs = self.agent.infer_states(obs_ids)
         
-        # Get context beliefs
-        q_context = qs[0]
-        
-        # Compute value profile for this trial
-        C_t, E_t, gamma_t = self.value_fn(q_context, t)
+        # Compute value profile for this trial (pass full beliefs)
+        C_t, E_t, gamma_t = self.value_fn(qs, t)
         
         # Update agent parameters
         self.agent.C[self.reward_mod_idx] = C_t
@@ -158,10 +177,9 @@ class AgentRunnerWithLL(AgentRunner):
         """
         # Standard inference
         qs = self.agent.infer_states(obs_ids)
-        q_context = qs[0]
         
-        # Get value profile
-        C_t, E_t, gamma_t = self.value_fn(q_context, t)
+        # Get value profile (pass full beliefs)
+        C_t, E_t, gamma_t = self.value_fn(qs, t)
         
         # Update agent
         self.agent.C[self.reward_mod_idx] = C_t
@@ -176,13 +194,13 @@ class AgentRunnerWithLL(AgentRunner):
         
         # Sample action
         chosen_action_ids = self.agent.sample_action()
-        u_choice = int(chosen_action_ids[1])
+        u_choice = int(chosen_action_ids[2])  # Choice action at index 2
         action_label = self.action_id_to_label(chosen_action_ids)
         
         # Compute log-likelihood of chosen action
         action_ll = -np.inf
         for pi_idx, policy in enumerate(self.agent.policies):
-            if int(policy[0, 1]) == u_choice:  # First action of policy matches
+            if int(policy[0, 2]) == u_choice:  # First action of policy (choice factor at index 2)
                 if action_ll == -np.inf:
                     action_ll = np.log(q_pi[pi_idx] + 1e-16)
                 else:
@@ -203,10 +221,9 @@ class AgentRunnerWithLL(AgentRunner):
         """
         # Infer hidden states from supplied observations
         qs = self.agent.infer_states(obs_ids)
-        q_context = qs[0]
 
-        # Value/profile update
-        C_t, E_t, gamma_t = self.value_fn(q_context, t)
+        # Value/profile update (pass full beliefs)
+        C_t, E_t, gamma_t = self.value_fn(qs, t)
         self.agent.C[self.reward_mod_idx] = C_t
         if E_t is not None and len(E_t) == len(self.agent.policies):
             self.agent.E = E_t
@@ -234,11 +251,16 @@ class AgentRunnerWithLL(AgentRunner):
         # action matches the requested action (log-sum-exp)
         action_ll = -np.inf
         for pi_idx, policy in enumerate(self.agent.policies):
-            if int(policy[0, 1]) == u_choice:
+            if int(policy[0, 2]) == u_choice:  # Choice action at index 2
                 if action_ll == -np.inf:
                     action_ll = np.log(q_pi[pi_idx] + 1e-16)
                 else:
                     action_ll = np.logaddexp(action_ll, np.log(q_pi[pi_idx] + 1e-16))
+
+        # CRITICAL: Set the agent's action so beliefs propagate correctly through B
+        # for the next trial. Action array: [context_action, better_arm_action, choice_action]
+        # Only choice (index 2) is controllable, others are 'rest' (index 0)
+        self.agent.action = np.array([0, 0, u_choice])
 
         return action_ll
 
@@ -273,7 +295,8 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
     from ..utils.helpers import print_trial_details
     
     if initial_obs_labels is None:
-        initial_obs_labels = ['null', 'null', 'observe_start']
+        # 4 observations: hint, reward, choice, context
+        initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
     
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
     
@@ -285,7 +308,8 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
         'action': [],
         'reward_label': [],
         'choice_label': [],
-        'hint_label': []
+        'hint_label': [],
+        'context_label': []  # NEW: track context observations
     }
     
     reversal_trials = set(env.reversal_schedule) if env.reversal_schedule else set()
@@ -307,6 +331,7 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
         logs['hint_label'].append(obs_labels[0])
         logs['reward_label'].append(obs_labels[1])
         logs['choice_label'].append(obs_labels[2])
+        logs['context_label'].append(obs_labels[3] if len(obs_labels) > 3 else None)
         
         # Conditional printing
         if verbose:
@@ -326,18 +351,20 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
     Returns logs with additional 'll' field containing per-trial log-likelihoods.
     """
     if initial_obs_labels is None:
-        initial_obs_labels = ['null', 'null', 'observe_start']
+        # 4 observations: hint, reward, choice, context
+        initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
     
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
     
     logs = {
         't': [],
         'context': [],
-        'current_better_arm': [],  # NEW: Track which arm is actually better
+        'current_better_arm': [],  # Track which arm is actually better
         'belief': [],
         'gamma': [],
         'action': [],
         'reward_label': [],
+        'context_label': [],  # NEW: track context observations
         'choice_label': [],
         'hint_label': [],
         'll': []
@@ -358,7 +385,7 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         # Log data
         logs['t'].append(t)
         logs['context'].append(env.context)
-        # NEW: Log which arm is currently better (for volatile/stable contexts)
+        # Log which arm is currently better (for volatile/stable contexts)
         logs['current_better_arm'].append(getattr(env, 'current_better_arm', None))
         logs['belief'].append(qs[0].copy())
         logs['gamma'].append(gamma_t)
@@ -366,8 +393,7 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         logs['hint_label'].append(obs_labels[0])
         logs['reward_label'].append(obs_labels[1])
         logs['choice_label'].append(obs_labels[2])
+        logs['context_label'].append(obs_labels[3] if len(obs_labels) > 3 else None)
         logs['ll'].append(ll_t)
-
-        # (method moved to class scope)
     
     return logs

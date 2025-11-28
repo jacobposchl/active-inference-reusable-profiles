@@ -2,27 +2,43 @@
 Global configuration parameters for all experiments.
 """
 
-# Task dimensionalities
-# NEW: Contexts now represent volatility regimes, not which arm is better
-# - 'volatile': Arms switch which is better every 10 trials (need frequent info-seeking)
-# - 'stable': Arms stay fixed for long periods (exploit after initial learning)
+# =============================================================================
+# STATE SPACE
+# =============================================================================
+# The agent tracks 3 hidden state factors:
+# 1. CONTEXT: Volatility regime (volatile vs stable)
+#    - 'volatile': Better arm switches frequently (every ~10 trials)
+#    - 'stable': Better arm stays fixed for long periods
+#
+# 2. BETTER_ARM: Which arm currently has higher reward probability
+#    - 'left_better': Left arm is currently better
+#    - 'right_better': Right arm is currently better
+#    - This is what hints reveal and what the agent should learn
+#
+# 3. CHOICE: The agent's current action state in the trial
+#    - Tracks what action was taken (start, hint, left, right)
+
 STATE_CONTEXTS = ['volatile', 'stable']
+STATE_BETTER_ARM = ['left_better', 'right_better']  # NEW: tracks which arm is better
 STATE_CHOICES = ['start', 'hint', 'left', 'right']
 
 ACTION_CONTEXTS = ['rest']
+ACTION_BETTER_ARM = ['rest']  # No direct control over which arm is better
 ACTION_CHOICES = ['act_start', 'act_hint', 'act_left', 'act_right']
 
 OBSERVATION_HINTS = ['null', 'observe_left_hint', 'observe_right_hint']
 OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
 OBSERVATION_CHOICES = ['observe_start', 'observe_hint', 'observe_left', 'observe_right']
+# NEW: Direct context observation - agent is TOLD which context it's in
+OBSERVATION_CONTEXTS = ['observe_volatile', 'observe_stable']
 
-# Derived dimensions
-NUM_STATES = [len(STATE_CONTEXTS), len(STATE_CHOICES)]
-NUM_ACTIONS = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-NUM_OBS = [len(OBSERVATION_HINTS), len(OBSERVATION_REWARDS), len(OBSERVATION_CHOICES)]
+# Derived dimensions - now 3 state factors, 4 observation modalities
+NUM_STATES = [len(STATE_CONTEXTS), len(STATE_BETTER_ARM), len(STATE_CHOICES)]
+NUM_ACTIONS = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
+NUM_OBS = [len(OBSERVATION_HINTS), len(OBSERVATION_REWARDS), len(OBSERVATION_CHOICES), len(OBSERVATION_CONTEXTS)]
 
 NUM_FACTORS = len(NUM_STATES)
-NUM_MODALITIES = len(NUM_OBS)
+NUM_MODALITIES = len(NUM_OBS)  # Now 4 modalities
 
 # Environment parameters (generative process)
 PROBABILITY_HINT = 0.85  # Hint accuracy (same for both contexts)

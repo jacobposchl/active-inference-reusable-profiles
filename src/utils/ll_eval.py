@@ -18,7 +18,8 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)
 
-    initial_obs_labels = ['null', 'null', 'observe_start']
+    # 4 observations: hint, reward, choice, context
+    initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
 
     T = len(ref_logs['action'])
@@ -28,10 +29,13 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
         ll_t = runner.action_logprob(obs_ids, action_label, t)
         ll_seq.append(ll_t)
 
+        # Construct context observation from context field
+        context_obs = f"observe_{ref_logs['context'][t]}" if 'context' in ref_logs else 'observe_volatile'
+        
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
-            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
         else:
-            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
 
         obs_ids = runner.obs_labels_to_ids(next_obs)
 
@@ -47,7 +51,8 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)
 
-    initial_obs_labels = ['null', 'null', 'observe_start']
+    # 4 observations: hint, reward, choice, context
+    initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
     T = len(ref_logs['action'])
     ll_seq = []
@@ -55,10 +60,13 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
         a = ref_logs['action'][t]
         ll_t = runner.action_logprob(obs_ids, a, t)
         ll_seq.append(ll_t)
+        # Construct context observation from context field
+        context_obs = f"observe_{ref_logs['context'][t]}" if 'context' in ref_logs else 'observe_volatile'
+        
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
-            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
         else:
-            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
+            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
         obs_ids = runner.obs_labels_to_ids(next_obs)
 
     return float(np.sum(ll_seq)), ll_seq
@@ -116,11 +124,13 @@ def _worker_init(A, B, D):
         C_temp = pymdp_utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
         temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
                          policy_len=2, inference_horizon=1,
-                         control_fac_idx=[1], use_utility=True,
+                         control_fac_idx=[2],  # Choice is factor 2 in 3-factor model
+                         use_utility=True,
                          use_states_info_gain=True,
                          action_selection="stochastic", gamma=16)
         M3_POLICIES_GLOB = temp_agent.policies
-        NUM_ACTIONS_PER_FACTOR_GLOB = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        # 3 action factors: [context, better_arm, choice]
+        NUM_ACTIONS_PER_FACTOR_GLOB = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
     except Exception:
         M3_POLICIES_GLOB = None
         NUM_ACTIONS_PER_FACTOR_GLOB = None
@@ -179,10 +189,9 @@ def _eval_m2_params(A, B, D, g_base, k, ref_logs):
     else:
         A_loc, B_loc, D_loc = A, B, D
 
-    def gamma_schedule(q, t, g_base=g_base, k=k):
-        p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-        H = -(p * np.log(p)).sum()
-        return g_base / (1.0 + k * H)
+    # gamma_schedule now receives H (entropy) directly, not the belief distribution
+    def gamma_schedule(H_better_arm, t, g_base=g_base, k=k):
+        return g_base / (1.0 + k * H_better_arm)
     value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
     total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
     return total_ll
@@ -199,10 +208,9 @@ def _eval_m2_params_masked(A, B, D, g_base, k, ref_logs, mask_indices):
     else:
         A_loc, B_loc, D_loc = A, B, D
 
-    def gamma_schedule(q, t, g_base=g_base, k=k):
-        p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-        H = -(p * np.log(p)).sum()
-        return g_base / (1.0 + k * H)
+    # gamma_schedule now receives H (entropy) directly, not the belief distribution
+    def gamma_schedule(H_better_arm, t, g_base=g_base, k=k):
+        return g_base / (1.0 + k * H_better_arm)
 
     value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
     total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
@@ -284,11 +292,13 @@ def _eval_m3_params_per_profile(A, B, D, gammas, xi_scales_profile, ref_logs):
             D_loc = D_GLOB
         except NameError:
             policies = None
-            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+            # 3 action factors: context, better_arm, choice
+            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
             A_loc, B_loc, D_loc = A, B, D
     else:
         policies = None
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        # 3 action factors: context, better_arm, choice
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
         A_loc, B_loc, D_loc = A, B, D
 
     profiles = []
@@ -321,11 +331,13 @@ def _eval_m3_params_per_profile_masked(A, B, D, gammas, xi_scales_profile, ref_l
             D_loc = D_GLOB
         except NameError:
             policies = None
-            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+            # 3 action factors: context, better_arm, choice
+            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
             A_loc, B_loc, D_loc = A, B, D
     else:
         policies = None
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        # 3 action factors: context, better_arm, choice
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
         A_loc, B_loc, D_loc = A, B, D
 
     profiles = []

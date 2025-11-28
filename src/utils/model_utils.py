@@ -9,11 +9,10 @@ def create_model(model_name, A, B, D):
         value_fn = make_value_fn('M1', **M1_DEFAULTS)
 
     elif model_name == 'M2':
-        def gamma_schedule(q, t, g_base=M2_DEFAULTS['gamma_base'], 
+        # gamma_schedule receives H (entropy of better_arm beliefs) directly
+        def gamma_schedule(H_better_arm, t, g_base=M2_DEFAULTS['gamma_base'], 
                           k=M2_DEFAULTS['entropy_k']):
-            p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-            H = -(p * np.log(p)).sum()
-            return g_base / (1.0 + k * H)
+            return g_base / (1.0 + k * H_better_arm)
         
         value_fn = make_value_fn('M2', 
                                 C_reward_logits=M2_DEFAULTS['C_reward_logits'],
@@ -21,18 +20,22 @@ def create_model(model_name, A, B, D):
         
     elif model_name == 'M3':
         # Get policies from temporary agent
+        # With 3 state factors: [context, better_arm, choice]
+        # Only choice (index 2) is controllable
         from pymdp.agent import Agent
         from pymdp import utils
         
         C_temp = utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
         temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
                          policy_len=2, inference_horizon=1,
-                         control_fac_idx=[1], use_utility=True,
+                         control_fac_idx=[2],  # Choice is now factor 2
+                         use_utility=True,
                          use_states_info_gain=True,
                          action_selection="stochastic", gamma=16)
         
         policies = temp_agent.policies
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
+        # 3 action factors: [context_action, better_arm_action, choice_action]
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
         
         value_fn = make_value_fn('M3',
                                 profiles=M3_DEFAULTS['profiles'],

@@ -322,9 +322,9 @@ def _parse_args():
         default="M1,M2,M3,egreedy,softmax",
         help="Comma-separated list of behavioral generators to simulate.",
     )
-    parser.add_argument("--runs-per-generator", type=int, default=10, help="Number of runs per generator.")
-    parser.add_argument("--num-trials", type=int, default=80, help="Trials per run.")
-    parser.add_argument("--seed", type=int, default=1, help="Random seed.")
+    parser.add_argument("--runs-per-generator", type=int, default=5, help="Number of runs per generator.")
+    parser.add_argument("--num-trials", type=int, default=400, help="Trials per run.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--reversal-interval",
         type=int,
