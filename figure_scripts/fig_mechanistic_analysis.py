@@ -318,14 +318,25 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
             gamma_traces.extend(aligned[rev_type]['gamma'])
         
         if gamma_traces:
-            # Plot individual traces with low alpha, mean with high alpha
+            # Plot individual traces with low alpha
+            # Reduce alpha for M2 to make it less noisy
+            trace_alpha = 0.001 if model == 'M2' else 0.3
             for i, trace in enumerate(gamma_traces):
-                ax_c.plot(x_aligned, trace, color=colors[model], linewidth=1, alpha=0.3)
+                ax_c.plot(x_aligned, trace, color=colors[model], linewidth=1, alpha=trace_alpha)
             
-            # Plot mean
-            mean_gamma = np.mean(gamma_traces, axis=0)
-            ax_c.plot(x_aligned, mean_gamma, color=colors[model], linewidth=2.5,
-                      label=f'{model}')
+            # Use median instead of mean to avoid artifacts from dramatic jumps at reversal
+            # This is especially important for M3 which switches between gamma=1.0 and 5.0
+            median_gamma = np.median(gamma_traces, axis=0)
+            
+            # Apply smoothing to M2 to reduce noise (M2's entropy-adaptive gamma is more variable)
+            if model == 'M2':
+                # Light smoothing with window size 3
+                smoothed_gamma = uniform_filter1d(median_gamma, size=3, mode='nearest')
+                ax_c.plot(x_aligned, smoothed_gamma, color=colors[model], linewidth=2.5,
+                          label=f'{model}')
+            else:
+                ax_c.plot(x_aligned, median_gamma, color=colors[model], linewidth=2.5,
+                          label=f'{model}')
     
     ax_c.axvline(0, color='black', linestyle='--', alpha=0.7, linewidth=2)
     ax_c.set_xlabel('Trials relative to reversal', fontsize=11)
@@ -368,41 +379,33 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     ax_d.legend(loc='upper left', fontsize=9)
     ax_d.grid(True, alpha=0.3, axis='y')
     
-    # Add annotation for M3's context-dependency
-    if stable_gammas[2] > volatile_gammas[2]:
-        ax_d.annotate('Context-dependent\nbaselines', xy=(2, stable_gammas[2]),
-                      xytext=(2.3, stable_gammas[2] * 0.8),
-                      fontsize=9, ha='left',
-                      arrowprops=dict(arrowstyle='->', color='gray'))
-    
     # =========================================================================
-    # Panel E: Context-Conditional Hint-Seeking Rate
+    # Panel E: Context-Conditional Hint-Seeking Rate (M3 only)
     # =========================================================================
     ax_e = fig.add_subplot(gs[1, 1])
     
-    volatile_hints = []
-    stable_hints = []
-    volatile_hint_se = []
-    stable_hint_se = []
+    # Only show M3 (M1 and M2 have very low hint rates, not visible)
+    model_df = data['M3'][run_idx]
+    stats = compute_context_conditional_stats_single_run(model_df)
     
-    for model in ['M1', 'M2', 'M3']:
-        model_df = data[model][run_idx]
-        stats = compute_context_conditional_stats_single_run(model_df)
-        volatile_hints.append(stats['volatile']['hint_rate'])
-        stable_hints.append(stats['stable']['hint_rate'])
-        volatile_hint_se.append(stats['volatile']['hint_se'])
-        stable_hint_se.append(stats['stable']['hint_se'])
+    x_pos_single = [0]
+    width = 0.35
     
-    bars1 = ax_e.bar(x_pos - width/2, volatile_hints, width, yerr=volatile_hint_se,
+    volatile_hints = [stats['volatile']['hint_rate']]
+    stable_hints = [stats['stable']['hint_rate']]
+    volatile_hint_se = [stats['volatile']['hint_se']]
+    stable_hint_se = [stats['stable']['hint_se']]
+    
+    bars1 = ax_e.bar(x_pos_single[0] - width/2, volatile_hints[0], width, yerr=volatile_hint_se[0],
                      label='Volatile context', color=colors['volatile'], capsize=4)
-    bars2 = ax_e.bar(x_pos + width/2, stable_hints, width, yerr=stable_hint_se,
+    bars2 = ax_e.bar(x_pos_single[0] + width/2, stable_hints[0], width, yerr=stable_hint_se[0],
                      label='Stable context', color=colors['stable'], capsize=4)
     
     ax_e.set_xlabel('Model', fontsize=11)
     ax_e.set_ylabel('Hint-seeking rate', fontsize=11)
-    ax_e.set_title(f'E. Context-Conditional Hint-Seeking (run {run_idx})', fontsize=12, fontweight='bold')
-    ax_e.set_xticks(x_pos)
-    ax_e.set_xticklabels(['M1', 'M2', 'M3'])
+    ax_e.set_title(f'E. Context-Conditional Hint-Seeking: M3\n(run {run_idx})', fontsize=12, fontweight='bold')
+    ax_e.set_xticks(x_pos_single)
+    ax_e.set_xticklabels(['M3'])
     ax_e.legend(loc='upper right', fontsize=9)
     ax_e.grid(True, alpha=0.3, axis='y')
     ax_e.set_ylim(0, 1)
@@ -453,11 +456,6 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
         y_margin = (y_max - y_min) * 0.15
         ax_f.set_ylim(y_min - y_margin, y_max + y_margin)
         ax_f.grid(True, alpha=0.3)
-        
-        # Add annotation
-        ax_f.annotate('Profile tracks context,\nnot arm switches', 
-                      xy=(25, (y_min + y_max)/2), fontsize=9, ha='center',
-                      bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat', alpha=0.8))
     else:
         ax_f.text(0.5, 0.5, 'Insufficient volatile\ntrials for analysis', 
                   ha='center', va='center', transform=ax_f.transAxes)
@@ -635,12 +633,20 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
                 gamma_traces.extend(aligned[rev_type]['gamma'])
             
             if gamma_traces:
-                mean_gamma = np.mean(gamma_traces, axis=0)
-                print(f"  {model}: gamma range [{mean_gamma.min():.3f}, {mean_gamma.max():.3f}], mean={mean_gamma.mean():.3f}")
+                # Use median for all models to avoid artifacts
+                central_gamma = np.median(gamma_traces, axis=0)
                 
+                # Apply smoothing to M2 to reduce noise
+                if model == 'M2':
+                    central_gamma = uniform_filter1d(central_gamma, size=3, mode='nearest')
+                
+                print(f"  {model}: gamma range [{central_gamma.min():.3f}, {central_gamma.max():.3f}], central={central_gamma.mean():.3f}")
+                
+                # Reduce alpha for M2 individual traces
+                trace_alpha = 0.2 if model == 'M2' else 0.3
                 for trace in gamma_traces:
-                    ax.plot(x_aligned, trace, color=colors[model], linewidth=1, alpha=0.3)
-                ax.plot(x_aligned, mean_gamma, color=colors[model], linewidth=2.5, label=f'{model}')
+                    ax.plot(x_aligned, trace, color=colors[model], linewidth=1, alpha=trace_alpha)
+                ax.plot(x_aligned, central_gamma, color=colors[model], linewidth=2.5, label=f'{model}')
             else:
                 print(f"  {model}: No gamma traces found")
         

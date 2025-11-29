@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import data_io, nassar_forward, preprocessing, cross_validation, rl_baselines
+from . import data_io, nassar_forward, preprocessing, cross_validation_aif, rl_baselines
 from .constants import RESULTS_DIR
 
 
@@ -17,10 +17,11 @@ def run_pipeline(save: bool = True) -> dict:
     events = data_io.load_dataset()
     events_with_signals = nassar_forward.compute_normative_signals(events)
     clean_trials, qc = preprocessing.prepare_trials(events_with_signals)
-    enriched = preprocessing.inject_belief_columns(clean_trials)
+    # Note: enriched with belief columns not needed for new AIF models
+    # They compute beliefs internally via pymdp
 
-    loso_results = cross_validation.loso_cv(enriched)
-    temporal_results = cross_validation.temporal_split_cv(enriched)
+    loso_results = cross_validation_aif.loso_cv(clean_trials)
+    temporal_results = cross_validation_aif.temporal_split_cv(clean_trials)
     rl_results = rl_baselines.run_rl_baselines(trials=clean_trials, save=save)
     loso_combined = pd.concat([loso_results, rl_results], ignore_index=True)
 
