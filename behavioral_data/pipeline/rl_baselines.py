@@ -19,6 +19,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from . import data_io, preprocessing
 
@@ -186,9 +187,15 @@ def run_rl_baselines(trials: Optional[pd.DataFrame] = None, save: bool = True) -
 
     subjects = sorted(trials["subject_id"].unique())
     records = []
-    for test_subject in subjects:
+    
+    # Outer loop: subjects
+    subject_pbar = tqdm(subjects, desc="RL Baselines", unit="subject", leave=True)
+    for test_subject in subject_pbar:
+        subject_pbar.set_postfix({"subject": test_subject, "models": "RW/Q-Learning"})
         train_df = trials[trials["subject_id"] != test_subject]
         test_df = trials[trials["subject_id"] == test_subject]
+        
+        # Inner loop: models
         for model in models:
             result = fit_and_score(model, train_df, test_df)
             records.append(
