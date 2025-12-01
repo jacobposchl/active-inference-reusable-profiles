@@ -13,7 +13,7 @@ class AgentRunner:
     """
     
     def __init__(self, A, B, D, value_fn, observation_hints, observation_rewards,
-                 observation_choices, action_choices, observation_contexts=None,
+                 observation_choices, action_choices,
                  reward_mod_idx=1, policy_len=2, inference_horizon=1):
         """
         Initialize agent runner.
@@ -36,8 +36,6 @@ class AgentRunner:
             Choice observation labels
         action_choices : list
             Choice action labels
-        observation_contexts : list or None
-            Context observation labels (e.g., ['observe_volatile', 'observe_stable'])
             If None, uses default from config
         reward_mod_idx : int
             Index of reward modality for C vector
@@ -56,11 +54,7 @@ class AgentRunner:
         self.action_choices = action_choices
         self.policy_len = policy_len
         
-        # Handle context observations (4th modality for direct context cue)
-        if observation_contexts is None:
-            from config.experiment_config import OBSERVATION_CONTEXTS
-            observation_contexts = OBSERVATION_CONTEXTS
-        self.observation_contexts = observation_contexts
+        # Context is now hidden - no direct observation
         
         self.gamma_t = None
         
@@ -84,16 +78,14 @@ class AgentRunner:
     def obs_labels_to_ids(self, obs_labels):
         """Convert observation strings to indices.
         
-        Handles both 3-obs (old) and 4-obs (with context) formats.
+        Handles 3 observation modalities: hints, rewards, choices.
+        Context is now hidden (inferred from reward patterns).
         """
         ids = [
             self.observation_hints.index(obs_labels[0]),
             self.observation_rewards.index(obs_labels[1]),
             self.observation_choices.index(obs_labels[2])
         ]
-        # Add context observation if provided (4th modality)
-        if len(obs_labels) > 3:
-            ids.append(self.observation_contexts.index(obs_labels[3]))
         return ids
     
     def action_id_to_label(self, chosen_action_ids):
@@ -295,8 +287,8 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
     from ..utils.helpers import print_trial_details
     
     if initial_obs_labels is None:
-        # 4 observations: hint, reward, choice, context
-        initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
+        # 3 observations: hint, reward, choice (context is hidden)
+        initial_obs_labels = ['null', 'null', 'observe_start']
     
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
     
@@ -309,7 +301,6 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
         'reward_label': [],
         'choice_label': [],
         'hint_label': [],
-        'context_label': []  # NEW: track context observations
     }
     
     reversal_trials = set(env.reversal_schedule) if env.reversal_schedule else set()
@@ -331,7 +322,6 @@ def run_episode(runner, env, T=200, verbose=False, initial_obs_labels=None,
         logs['hint_label'].append(obs_labels[0])
         logs['reward_label'].append(obs_labels[1])
         logs['choice_label'].append(obs_labels[2])
-        logs['context_label'].append(obs_labels[3] if len(obs_labels) > 3 else None)
         
         # Conditional printing
         if verbose:
@@ -351,8 +341,8 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
     Returns logs with additional 'll' field containing per-trial log-likelihoods.
     """
     if initial_obs_labels is None:
-        # 4 observations: hint, reward, choice, context
-        initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
+        # 3 observations: hint, reward, choice (context is hidden)
+        initial_obs_labels = ['null', 'null', 'observe_start']
     
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
     
@@ -364,7 +354,6 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         'gamma': [],
         'action': [],
         'reward_label': [],
-        'context_label': [],  # NEW: track context observations
         'choice_label': [],
         'hint_label': [],
         'll': []
@@ -393,7 +382,6 @@ def run_episode_with_ll(runner, env, T=200, verbose=False, initial_obs_labels=No
         logs['hint_label'].append(obs_labels[0])
         logs['reward_label'].append(obs_labels[1])
         logs['choice_label'].append(obs_labels[2])
-        logs['context_label'].append(obs_labels[3] if len(obs_labels) > 3 else None)
         logs['ll'].append(ll_t)
     
     return logs

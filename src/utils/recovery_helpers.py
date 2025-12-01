@@ -132,25 +132,26 @@ def build_abd():
     - better_arm (left_better/right_better) 
     - choice (start/hint/left/right)
     
-    And 4 observation modalities:
+    And 3 observation modalities:
     - hints (reveal which arm is better)
-    - rewards (outcome of arm choice)
+    - rewards (outcome of arm choice, context-dependent probabilities)
     - choices (observe own action)
-    - contexts (DIRECT CUE - agent is TOLD which context it's in)
     
-    Context is directly observable via the 4th modality, so the agent
-    always knows if it's in volatile or stable mode and can adapt
-    its strategy accordingly (M3 profile mixing).
+    Context is a HIDDEN state - agent infers it from reward patterns.
+    Different reward probabilities (volatile: 70%, stable: 90%) enable
+    context inference, allowing M3 profile mixing based on inferred context.
     """
-    # Average reward probability for agent's beliefs
-    avg_reward_prob = 0.80
+    # Context-specific reward probabilities for better arm
+    # Volatile context: 0.70, Stable context: 0.90
+    # This enables context inference from reward patterns
+    from config.experiment_config import VOLATILE_REWARD_BETTER, STABLE_REWARD_BETTER
+    p_reward = [VOLATILE_REWARD_BETTER, STABLE_REWARD_BETTER]
     
     A = build_A(NUM_MODALITIES, 
                 STATE_CONTEXTS, STATE_BETTER_ARM, STATE_CHOICES,
                 OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
-                OBSERVATION_CONTEXTS,  # NEW: direct context observation
                 p_hint=PROBABILITY_HINT,
-                p_reward=avg_reward_prob)
+                p_reward=p_reward)
     B = build_B(STATE_CONTEXTS, STATE_BETTER_ARM, STATE_CHOICES, 
                 ACTION_CONTEXTS, ACTION_BETTER_ARM, ACTION_CHOICES,
                 context_volatility=DEFAULT_CONTEXT_VOLATILITY)
@@ -1073,8 +1074,8 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
     reversals = set(find_reversals(ref_logs['context']))
 
     # initial observation
-    # 4 observations: hint, reward, choice, context
-    initial_obs_labels = ['null', 'null', 'observe_start', 'observe_volatile']
+    # 3 observations: hint, reward, choice (context is hidden)
+    initial_obs_labels = ['null', 'null', 'observe_start']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
 
     for t in range(T):
@@ -1178,13 +1179,11 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
             runner.agent.action = np.array([0, 0, gen_a_idx])
 
         # advance obs to next trial using generator's recorded obs
-        # Construct context observation from context field
-        context_obs = f"observe_{ref_logs['context'][t]}" if 'context' in ref_logs else 'observe_volatile'
-        
+        # Context is now hidden - no direct observation
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
-            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
+            next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
         else:
-            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t], context_obs]
+            next_obs = ['null', ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
         obs_ids = runner.obs_labels_to_ids(next_obs)
 
     return rows

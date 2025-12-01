@@ -140,8 +140,8 @@ class TwoArmedBandit:
         Returns:
         --------
         observations : list of str
-            [hint_obs, reward_obs, choice_obs, context_obs]
-            Context observation is a DIRECT CUE telling the agent which context it's in.
+            [hint_obs, reward_obs, choice_obs]
+            Context is now hidden - agent must infer it from reward patterns.
         """
         # Increment trial count FIRST before checking reversals
         # This ensures reversals happen at the correct trial indices
@@ -199,8 +199,6 @@ class TwoArmedBandit:
         else:
             raise ValueError(f"Unknown action: {action}")
         
-        # DIRECT context observation - agent is TOLD which context it's in
-        observed_context = f"observe_{self.context}"
-        
-        observations = [observed_hint, observed_reward, observed_choice, observed_context]
+        # Context is now hidden - no direct observation
+        observations = [observed_hint, observed_reward, observed_choice]
         return observations

@@ -6,9 +6,10 @@ Global configuration parameters for all experiments.
 # STATE SPACE
 # =============================================================================
 # The agent tracks 3 hidden state factors:
-# 1. CONTEXT: Volatility regime (volatile vs stable)
+# 1. CONTEXT: Volatility regime (volatile vs stable) - HIDDEN STATE
 #    - 'volatile': Better arm switches frequently (every ~10 trials)
 #    - 'stable': Better arm stays fixed for long periods
+#    - Agent infers context from reward probability patterns (70/30 vs 90/10)
 #
 # 2. BETTER_ARM: Which arm currently has higher reward probability
 #    - 'left_better': Left arm is currently better
@@ -29,16 +30,15 @@ ACTION_CHOICES = ['act_start', 'act_hint', 'act_left', 'act_right']
 OBSERVATION_HINTS = ['null', 'observe_left_hint', 'observe_right_hint']
 OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
 OBSERVATION_CHOICES = ['observe_start', 'observe_hint', 'observe_left', 'observe_right']
-# NEW: Direct context observation - agent is TOLD which context it's in
-OBSERVATION_CONTEXTS = ['observe_volatile', 'observe_stable']
+# Context is now a HIDDEN state - agent must infer it from reward patterns
 
-# Derived dimensions - now 3 state factors, 4 observation modalities
+# Derived dimensions - 3 state factors, 3 observation modalities
 NUM_STATES = [len(STATE_CONTEXTS), len(STATE_BETTER_ARM), len(STATE_CHOICES)]
 NUM_ACTIONS = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
-NUM_OBS = [len(OBSERVATION_HINTS), len(OBSERVATION_REWARDS), len(OBSERVATION_CHOICES), len(OBSERVATION_CONTEXTS)]
+NUM_OBS = [len(OBSERVATION_HINTS), len(OBSERVATION_REWARDS), len(OBSERVATION_CHOICES)]
 
 NUM_FACTORS = len(NUM_STATES)
-NUM_MODALITIES = len(NUM_OBS)  # Now 4 modalities
+NUM_MODALITIES = len(NUM_OBS)  # Now 3 modalities (context is hidden)
 
 # Environment parameters (generative process)
 PROBABILITY_HINT = 0.85  # Hint accuracy (same for both contexts)

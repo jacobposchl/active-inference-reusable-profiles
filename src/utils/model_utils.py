@@ -60,7 +60,14 @@ def get_num_parameters(model_name):
         return 2  # gamma_base and entropy_k (C_reward_logits are fixed)
         
     elif model_name == 'M3':
-        return 4  # gamma_p0, gamma_p1, hint_scale, arm_scale (phi_logits fixed, xi scales shared)
+        # M3 optimizes 4 parameters:
+        # - gamma_p0: policy precision for profile 0 (volatile/exploratory)
+        # - gamma_p1: policy precision for profile 1 (stable/exploitative)
+        # - hint_scale: shared scaling factor for hint action preferences (applied to both profiles)
+        # - arm_scale: shared scaling factor for left/right arm preferences (applied to both profiles)
+        # Note: phi_logits (outcome preferences) are fixed. xi scales are shared parameters that multiply
+        # each profile's base xi_logits (e.g., profile 0 base hint=3.0, profile 1 base hint=0.5).
+        return 4
     return 0
 
 

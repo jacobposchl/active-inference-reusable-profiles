@@ -10,7 +10,7 @@ State factors:
 
 Observation modalities:
     0: hints - reveals which arm is better
-    1: rewards - outcome of arm choice
+    1: rewards - outcome of arm choice (context-dependent probabilities enable context inference)
     2: choices - observes own action
 """
 import numpy as np
@@ -20,19 +20,17 @@ from pymdp import utils
 def build_A(num_modalities, 
             state_contexts, state_better_arm, state_choices,
             observation_hints, observation_rewards, observation_choices,
-            observation_contexts,
             p_hint, p_reward):
     """
     Build likelihood matrix A: p(o_t | s_t).
     
-    Now handles 3 state factors: context, better_arm, choice.
-    Includes a 4th observation modality that DIRECTLY reveals context,
-    making context fully observable to the agent.
+    Handles 3 state factors: context, better_arm, choice.
+    Context is now a HIDDEN state - agent infers it from reward patterns.
     
     Parameters:
     -----------
     num_modalities : int
-        Number of observation modalities (4: hints, rewards, choices, contexts)
+        Number of observation modalities (3: hints, rewards, choices)
     state_contexts : list
         Context state labels ['volatile', 'stable']
     state_better_arm : list
@@ -45,23 +43,29 @@ def build_A(num_modalities,
         Reward observation labels ['null', 'observe_loss', 'observe_reward']
     observation_choices : list
         Choice observation labels
-    observation_contexts : list
-        Context observation labels ['observe_volatile', 'observe_stable']
     p_hint : float
         Believed probability of correct hint
-    p_reward : float
-        Believed probability of reward from better arm
+    p_reward : list or array-like
+        Reward probabilities for better arm, context-specific.
+        Should have length equal to number of contexts.
+        p_reward[0] = reward prob for volatile context, p_reward[1] = stable context.
+        Worse arm probability is (1 - p_reward[ctx_idx]) for each context.
+        Different reward probabilities (e.g., 0.70 vs 0.90) enable context inference.
         
     Returns:
     --------
     A : object array
         Likelihood matrices for each modality
         A[0] shape: (n_hint_obs, n_contexts, n_better_arm, n_choices)
-        A[1] shape: (n_reward_obs, n_contexts, n_better_arm, n_choices)
+        A[1] shape: (n_reward_obs, n_contexts, n_better_arm, n_choices) - context-dependent
         A[2] shape: (n_choice_obs, n_contexts, n_better_arm, n_choices)
-        A[3] shape: (n_context_obs, n_contexts, n_better_arm, n_choices) - DIRECT context cue
     """
+    # Convert p_reward to array and validate
+    p_reward = np.asarray(p_reward, dtype=float)
     n_contexts = len(state_contexts)
+    if len(p_reward) != n_contexts:
+        raise ValueError(f"p_reward must have length {n_contexts} (one per context), got {len(p_reward)}")
+    
     n_better_arm = len(state_better_arm)
     n_choices = len(state_choices)
     
@@ -88,32 +92,38 @@ def build_A(num_modalities,
                 A_hint[0, ctx_idx, :, choice_idx] = 1.0  # null hint
     
     # =========================================================================
-    # A[1]: Reward observations - depends on better_arm and choice
+    # A[1]: Reward observations - depends on better_arm, choice, AND CONTEXT
     # =========================================================================
     # Shape: (n_reward_obs, n_contexts, n_better_arm, n_choices)
+    # Reward probabilities differ by context:
+    # - Volatile context (ctx_idx=0): p_reward[0] for better arm, (1-p_reward[0]) for worse
+    # - Stable context (ctx_idx=1): p_reward[1] for better arm, (1-p_reward[1]) for worse
     A_reward = np.zeros((len(observation_rewards), n_contexts, n_better_arm, n_choices))
     
     for ctx_idx in range(n_contexts):
+        # Get context-specific reward probability for better arm
+        p_reward_ctx = p_reward[ctx_idx]
+        
         for choice_idx, choice in enumerate(state_choices):
             if choice in ["start", "hint"]:
                 # No reward for start/hint actions
                 A_reward[0, ctx_idx, :, choice_idx] = 1.0  # null reward
             elif choice == "left":
                 # Chose left arm - reward depends on whether left is better
-                # better_arm=0 (left_better): high reward prob
-                # better_arm=1 (right_better): low reward prob
-                A_reward[1, ctx_idx, 0, choice_idx] = 1 - p_reward  # P(loss | left, left_better)
-                A_reward[2, ctx_idx, 0, choice_idx] = p_reward      # P(reward | left, left_better)
-                A_reward[1, ctx_idx, 1, choice_idx] = p_reward      # P(loss | left, right_better)
-                A_reward[2, ctx_idx, 1, choice_idx] = 1 - p_reward  # P(reward | left, right_better)
+                # better_arm=0 (left_better): high reward prob (context-specific)
+                # better_arm=1 (right_better): low reward prob (context-specific)
+                A_reward[1, ctx_idx, 0, choice_idx] = 1 - p_reward_ctx  # P(loss | left, left_better)
+                A_reward[2, ctx_idx, 0, choice_idx] = p_reward_ctx      # P(reward | left, left_better)
+                A_reward[1, ctx_idx, 1, choice_idx] = p_reward_ctx      # P(loss | left, right_better)
+                A_reward[2, ctx_idx, 1, choice_idx] = 1 - p_reward_ctx  # P(reward | left, right_better)
             elif choice == "right":
                 # Chose right arm - reward depends on whether right is better
-                # better_arm=0 (left_better): low reward prob
-                # better_arm=1 (right_better): high reward prob
-                A_reward[1, ctx_idx, 0, choice_idx] = p_reward      # P(loss | right, left_better)
-                A_reward[2, ctx_idx, 0, choice_idx] = 1 - p_reward  # P(reward | right, left_better)
-                A_reward[1, ctx_idx, 1, choice_idx] = 1 - p_reward  # P(loss | right, right_better)
-                A_reward[2, ctx_idx, 1, choice_idx] = p_reward      # P(reward | right, right_better)
+                # better_arm=0 (left_better): low reward prob (context-specific)
+                # better_arm=1 (right_better): high reward prob (context-specific)
+                A_reward[1, ctx_idx, 0, choice_idx] = p_reward_ctx      # P(loss | right, left_better)
+                A_reward[2, ctx_idx, 0, choice_idx] = 1 - p_reward_ctx  # P(reward | right, left_better)
+                A_reward[1, ctx_idx, 1, choice_idx] = 1 - p_reward_ctx  # P(loss | right, right_better)
+                A_reward[2, ctx_idx, 1, choice_idx] = p_reward_ctx      # P(reward | right, right_better)
     
     # =========================================================================
     # A[2]: Choice observations - one-to-one mapping to choice state
@@ -127,25 +137,9 @@ def build_A(num_modalities,
                 # Observe what choice was made
                 A_choice[choice_idx, ctx_idx, better_idx, choice_idx] = 1.0
     
-    # =========================================================================
-    # A[3]: Context observations - DIRECTLY reveals context (perfect cue)
-    # =========================================================================
-    # This makes context fully observable - the agent is TOLD which context it's in
-    # Shape: (n_context_obs, n_contexts, n_better_arm, n_choices)
-    A_context = np.zeros((len(observation_contexts), n_contexts, n_better_arm, n_choices))
-    
-    for ctx_idx in range(n_contexts):
-        for better_idx in range(n_better_arm):
-            for choice_idx in range(n_choices):
-                # Direct, perfect observation of context
-                # observe_volatile (idx 0) when in volatile (ctx 0)
-                # observe_stable (idx 1) when in stable (ctx 1)
-                A_context[ctx_idx, ctx_idx, better_idx, choice_idx] = 1.0
-    
     A[0] = A_hint
     A[1] = A_reward
     A[2] = A_choice
-    A[3] = A_context
     
     return A
 

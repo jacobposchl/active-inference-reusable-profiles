@@ -22,6 +22,7 @@ Output:
 
 import argparse
 import os
+import sys
 import glob
 import ast
 import numpy as np
@@ -30,6 +31,11 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from scipy.ndimage import uniform_filter1d
 from pathlib import Path
+
+# Add project root to Python path so we can import src modules
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 
 def load_trial_data(results_dir: str, generator: str = 'M3') -> dict:
@@ -102,13 +108,33 @@ def load_trial_data(results_dir: str, generator: str = 'M3') -> dict:
     return data
 
 
-def compute_reversal_aligned_data_single_run(df: pd.DataFrame, window: int = 10) -> dict:
+def compute_reversal_aligned_data_single_run(df: pd.DataFrame, window: int = None, window_before: int = None, window_after: int = None) -> dict:
     """
     Align data to context reversals for a SINGLE run.
+    
+    Parameters:
+    -----------
+    window : int, optional
+        If provided, creates symmetric window (window before, window after)
+    window_before : int, optional
+        Number of trials before reversal to include (default: 10 or window if provided)
+    window_after : int, optional
+        Number of trials after reversal to include (default: 40 or window if provided)
     
     Returns dict with keys: 'volatile_to_stable', 'stable_to_volatile'
     Each contains list of individual reversal segments (not averaged).
     """
+    # Handle backward compatibility: if window is provided, use symmetric window
+    if window is not None:
+        window_before = window
+        window_after = window
+    else:
+        # Default asymmetric window for Panels A & B
+        if window_before is None:
+            window_before = 10
+        if window_after is None:
+            window_after = 40
+    
     results = {
         'volatile_to_stable': {'profile_0': [], 'profile_1': [], 'gamma': [], 'hint_rate': []},
         'stable_to_volatile': {'profile_0': [], 'profile_1': [], 'gamma': [], 'hint_rate': []}
@@ -119,7 +145,9 @@ def compute_reversal_aligned_data_single_run(df: pd.DataFrame, window: int = 10)
     
     for rev_idx in reversal_indices:
         # Skip if too close to boundaries
-        if rev_idx < window or rev_idx + window >= len(df):
+        # Need window_before trials before, and window_after trials starting from reversal (inclusive)
+        # So we need indices up to rev_idx + window_after - 1
+        if rev_idx < window_before or (rev_idx + window_after - 1) >= len(df):
             continue
         
         # Get context before and after reversal
@@ -134,19 +162,98 @@ def compute_reversal_aligned_data_single_run(df: pd.DataFrame, window: int = 10)
         else:
             continue
         
-        # Extract window around reversal
-        start = rev_idx - window
-        end = rev_idx + window
+        # Extract window around reversal (asymmetric)
+        # Include window_before trials before reversal, and window_after trials after
+        # The reversal point itself is included in the "after" trials
+        start = rev_idx - window_before
+        end = rev_idx + window_after - 1  # -1 to make end exclusive, or adjust expected_length
         
-        segment = df.loc[start:end-1].copy()
+        segment = df.loc[start:end].copy()
         
-        if len(segment) == 2 * window:
+        # Check we got the right length
+        # Segment includes: window_before trials before + (window_after trials starting from reversal point)
+        expected_length = window_before + window_after
+        if len(segment) == expected_length:
             results[key]['profile_0'].append(segment['belief_volatile'].values)
             results[key]['profile_1'].append(segment['belief_stable'].values)
             results[key]['gamma'].append(segment['gamma'].values)
             results[key]['hint_rate'].append(segment['hint_flag'].values)
     
     return results
+
+
+def _load_recovered_m3_params(results_dir: str, run_idx: int = 0):
+    """
+    Load recovered M3 parameters from model recovery results.
+    
+    Returns dict with 'gamma_profile' and 'xi_scales_profile', or None if not found.
+    """
+    import json
+    
+    # Path to run summary CSV
+    summary_path = os.path.join(results_dir, 'run_summary', 'gen_M3', 'model_M3.csv')
+    
+    if not os.path.exists(summary_path):
+        print(f"Warning: Could not find {summary_path}")
+        return None
+    
+    try:
+        df = pd.read_csv(summary_path)
+        if len(df) == 0:
+            return None
+        
+        # Get parameters from first run (or specified run_idx)
+        row = df.iloc[run_idx] if run_idx < len(df) else df.iloc[0]
+        
+        # Parse best_params_per_fold
+        params_json = row['best_params_per_fold']
+        params_list = json.loads(params_json)
+        
+        # Use parameters from first fold (they should all be the same)
+        params = params_list[0]
+        
+        return {
+            'gamma_profile': params['gamma_profile'],
+            'xi_scales_profile': params['xi_scales_profile']
+        }
+    except Exception as e:
+        print(f"Warning: Error loading recovered parameters: {e}")
+        return None
+
+
+def _create_m3_profiles_from_recovered(recovered_params: dict):
+    """
+    Create M3 profiles from recovered parameters.
+    
+    recovered_params should have:
+        - 'gamma_profile': [gamma_p0, gamma_p1]
+        - 'xi_scales_profile': [[hint_scale, arm_scale, arm_scale], [hint_scale, arm_scale, arm_scale]]
+    """
+    from config.experiment_config import M3_DEFAULTS
+    
+    profiles = []
+    base_profiles = M3_DEFAULTS['profiles']
+    gamma_profile = recovered_params['gamma_profile']
+    xi_scales_profile = recovered_params['xi_scales_profile']
+    
+    for p_idx, base_prof in enumerate(base_profiles):
+        prof = dict(base_prof)
+        # Set gamma from recovered
+        prof['gamma'] = float(gamma_profile[p_idx])
+        
+        # Scale xi_logits
+        orig_xi = np.array(base_prof['xi_logits'], float)
+        scales3 = xi_scales_profile[p_idx]
+        new_xi = orig_xi.copy()
+        # scales3 is [hint_scale, arm_scale, arm_scale]
+        new_xi[1] = orig_xi[1] * float(scales3[0])  # hint
+        new_xi[2] = orig_xi[2] * float(scales3[1])  # left
+        new_xi[3] = orig_xi[3] * float(scales3[2])  # right
+        prof['xi_logits'] = new_xi.tolist()
+        
+        profiles.append(prof)
+    
+    return profiles
 
 
 def compute_context_conditional_stats_single_run(df: pd.DataFrame) -> dict:
@@ -190,7 +297,7 @@ def compute_context_conditional_stats_single_run(df: pd.DataFrame) -> dict:
     }
 
 
-def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
+def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0, results_dir: str = None):
     """
     Create multi-panel mechanistic analysis figure using a SINGLE run.
     
@@ -202,6 +309,8 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
         Where to save the figure
     run_idx : int
         Which run to use (default: 0)
+    results_dir : str, optional
+        Path to model recovery results directory (needed for Panel F)
     """
     # Setup figure
     fig = plt.figure(figsize=(16, 12))
@@ -219,12 +328,18 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     }
     
     # Use single run for all analyses
-    window = 10  # Reduced from 40 to 10
-    x_aligned = np.arange(-window, window)
+    # Asymmetric window for Panels A & B: -10 trials before, +40 trials after reversal
+    window_before = 10
+    window_after = 40
+    x_aligned = np.arange(-window_before, window_after)
     
-    # Get single run data for M3
+    # Symmetric window for Panel C (gamma dynamics)
+    window = 20
+    x_aligned_symmetric = np.arange(-window, window)  # For Panel C
+    
+    # Get single run data for M3 (Panels A & B use asymmetric window)
     m3_df = data['M3'][run_idx]
-    m3_aligned = compute_reversal_aligned_data_single_run(m3_df, window=window)
+    m3_aligned = compute_reversal_aligned_data_single_run(m3_df, window_before=window_before, window_after=window_after)
     
     # =========================================================================
     # Panel A: Profile Recruitment Dynamics (Volatile → Stable)
@@ -233,27 +348,39 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     
     v2s_data = m3_aligned['volatile_to_stable']
     if len(v2s_data['profile_0']) > 0:
-        # Plot individual reversal events as semi-transparent lines
-        for i, (p0, p1) in enumerate(zip(v2s_data['profile_0'], v2s_data['profile_1'])):
-            alpha = 0.4 if len(v2s_data['profile_0']) > 1 else 1.0
-            lw = 1.5 if len(v2s_data['profile_0']) > 1 else 2
-            label_p0 = 'w₀ (Volatile profile)' if i == 0 else None
-            label_p1 = 'w₁ (Stable profile)' if i == 0 else None
-            ax_a.plot(x_aligned, p0, color=colors['profile_0'], linewidth=lw, 
-                      alpha=alpha, label=label_p0)
-            ax_a.plot(x_aligned, p1, color=colors['profile_1'], linewidth=lw,
-                      alpha=alpha, label=label_p1)
+        # Stack arrays for computing statistics
+        p0_array = np.array(v2s_data['profile_0'])  # Shape: (n_reversals, window*2)
+        p1_array = np.array(v2s_data['profile_1'])  # Shape: (n_reversals, window*2)
+        
+        # Compute mean and standard error
+        p0_mean = np.mean(p0_array, axis=0)
+        p1_mean = np.mean(p1_array, axis=0)
+        p0_se = np.std(p0_array, axis=0) / np.sqrt(len(p0_array))
+        p1_se = np.std(p1_array, axis=0) / np.sqrt(len(p1_array))
+        
+        # Plot mean lines with confidence intervals
+        ax_a.fill_between(x_aligned, p0_mean - p0_se, p0_mean + p0_se, 
+                         color=colors['profile_0'], alpha=0.2, label=None)
+        ax_a.fill_between(x_aligned, p1_mean - p1_se, p1_mean + p1_se,
+                         color=colors['profile_1'], alpha=0.2, label=None)
+        
+        # Plot mean lines prominently
+        ax_a.plot(x_aligned, p0_mean, color=colors['profile_0'], linewidth=2.5,
+                 label='w₀ (Volatile profile)', zorder=10)
+        ax_a.plot(x_aligned, p1_mean, color=colors['profile_1'], linewidth=2.5,
+                 label='w₁ (Stable profile)', zorder=10)
         
         ax_a.axvline(0, color='black', linestyle='--', alpha=0.7, linewidth=2, label='Reversal')
         n = len(v2s_data['profile_0'])
         ax_a.set_title(f'A. Profile Recruitment: Volatile → Stable\n(n={n} reversal{"s" if n > 1 else ""}, run {run_idx})', 
                        fontsize=12, fontweight='bold')
         
-        # Compute y-axis range from data
-        all_vals = np.concatenate(v2s_data['profile_0'] + v2s_data['profile_1'])
+        # Compute y-axis range from mean ± SE
+        all_vals = np.concatenate([p0_mean - p0_se, p0_mean + p0_se, 
+                                   p1_mean - p1_se, p1_mean + p1_se])
         y_min, y_max = all_vals.min(), all_vals.max()
         y_margin = (y_max - y_min) * 0.1
-        ax_a.set_ylim(y_min - y_margin, y_max + y_margin)
+        ax_a.set_ylim(max(0, y_min - y_margin), min(1, y_max + y_margin))
     else:
         ax_a.text(0.5, 0.5, 'No volatile→stable\nreversals found', ha='center', va='center',
                   transform=ax_a.transAxes)
@@ -261,7 +388,7 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     
     ax_a.set_xlabel('Trials relative to reversal', fontsize=11)
     ax_a.set_ylabel('Profile weight', fontsize=11)
-    ax_a.legend(loc='best', fontsize=9)
+    ax_a.legend(loc='upper left', fontsize=9)
     ax_a.grid(True, alpha=0.3)
     
     # =========================================================================
@@ -271,27 +398,39 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     
     s2v_data = m3_aligned['stable_to_volatile']
     if len(s2v_data['profile_0']) > 0:
-        # Plot individual reversal events as semi-transparent lines
-        for i, (p0, p1) in enumerate(zip(s2v_data['profile_0'], s2v_data['profile_1'])):
-            alpha = 0.4 if len(s2v_data['profile_0']) > 1 else 1.0
-            lw = 1.5 if len(s2v_data['profile_0']) > 1 else 2
-            label_p0 = 'w₀ (Volatile profile)' if i == 0 else None
-            label_p1 = 'w₁ (Stable profile)' if i == 0 else None
-            ax_b.plot(x_aligned, p0, color=colors['profile_0'], linewidth=lw,
-                      alpha=alpha, label=label_p0)
-            ax_b.plot(x_aligned, p1, color=colors['profile_1'], linewidth=lw,
-                      alpha=alpha, label=label_p1)
+        # Stack arrays for computing statistics
+        p0_array = np.array(s2v_data['profile_0'])  # Shape: (n_reversals, window*2)
+        p1_array = np.array(s2v_data['profile_1'])  # Shape: (n_reversals, window*2)
+        
+        # Compute mean and standard error
+        p0_mean = np.mean(p0_array, axis=0)
+        p1_mean = np.mean(p1_array, axis=0)
+        p0_se = np.std(p0_array, axis=0) / np.sqrt(len(p0_array))
+        p1_se = np.std(p1_array, axis=0) / np.sqrt(len(p1_array))
+        
+        # Plot mean lines with confidence intervals
+        ax_b.fill_between(x_aligned, p0_mean - p0_se, p0_mean + p0_se,
+                         color=colors['profile_0'], alpha=0.2, label=None)
+        ax_b.fill_between(x_aligned, p1_mean - p1_se, p1_mean + p1_se,
+                         color=colors['profile_1'], alpha=0.2, label=None)
+        
+        # Plot mean lines prominently
+        ax_b.plot(x_aligned, p0_mean, color=colors['profile_0'], linewidth=2.5,
+                 label='w₀ (Volatile profile)', zorder=10)
+        ax_b.plot(x_aligned, p1_mean, color=colors['profile_1'], linewidth=2.5,
+                 label='w₁ (Stable profile)', zorder=10)
         
         ax_b.axvline(0, color='black', linestyle='--', alpha=0.7, linewidth=2, label='Reversal')
         n = len(s2v_data['profile_0'])
         ax_b.set_title(f'B. Profile Recruitment: Stable → Volatile\n(n={n} reversal{"s" if n > 1 else ""}, run {run_idx})',
                        fontsize=12, fontweight='bold')
         
-        # Compute y-axis range from data
-        all_vals = np.concatenate(s2v_data['profile_0'] + s2v_data['profile_1'])
+        # Compute y-axis range from mean ± SE
+        all_vals = np.concatenate([p0_mean - p0_se, p0_mean + p0_se,
+                                   p1_mean - p1_se, p1_mean + p1_se])
         y_min, y_max = all_vals.min(), all_vals.max()
         y_margin = (y_max - y_min) * 0.1
-        ax_b.set_ylim(y_min - y_margin, y_max + y_margin)
+        ax_b.set_ylim(max(0, y_min - y_margin), min(1, y_max + y_margin))
     else:
         ax_b.text(0.5, 0.5, 'No stable→volatile\nreversals found', ha='center', va='center',
                   transform=ax_b.transAxes)
@@ -299,7 +438,7 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     
     ax_b.set_xlabel('Trials relative to reversal', fontsize=11)
     ax_b.set_ylabel('Profile weight', fontsize=11)
-    ax_b.legend(loc='best', fontsize=9)
+    ax_b.legend(loc='upper left', fontsize=9)
     ax_b.grid(True, alpha=0.3)
     
     # =========================================================================
@@ -318,31 +457,36 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
             gamma_traces.extend(aligned[rev_type]['gamma'])
         
         if gamma_traces:
-            # Plot individual traces with low alpha
-            # Reduce alpha for M2 to make it less noisy
-            trace_alpha = 0.001 if model == 'M2' else 0.3
-            for i, trace in enumerate(gamma_traces):
-                ax_c.plot(x_aligned, trace, color=colors[model], linewidth=1, alpha=trace_alpha)
+            # Convert to numpy array for easier handling
+            gamma_array = np.array(gamma_traces)
             
-            # Use median instead of mean to avoid artifacts from dramatic jumps at reversal
-            # This is especially important for M3 which switches between gamma=1.0 and 5.0
-            median_gamma = np.median(gamma_traces, axis=0)
+            # For M1, gamma should be constant, so use mean (should be same across all traces)
+            # For M2 and M3, use median to avoid artifacts from jumps
+            if model == 'M1':
+                # M1 has constant gamma, so just use the first trace or mean across all
+                # Since it should be constant, mean of means should work
+                central_gamma = np.mean(gamma_array, axis=0)
+                # Don't plot individual traces for M1 (they should all be the same anyway)
+            else:
+                # For M2 and M3, don't plot individual traces, just the central tendency
+                # Use median instead of mean to avoid artifacts from dramatic jumps at reversal
+                central_gamma = np.median(gamma_array, axis=0)
             
             # Apply smoothing to M2 to reduce noise (M2's entropy-adaptive gamma is more variable)
             if model == 'M2':
                 # Light smoothing with window size 3
-                smoothed_gamma = uniform_filter1d(median_gamma, size=3, mode='nearest')
-                ax_c.plot(x_aligned, smoothed_gamma, color=colors[model], linewidth=2.5,
-                          label=f'{model}')
-            else:
-                ax_c.plot(x_aligned, median_gamma, color=colors[model], linewidth=2.5,
-                          label=f'{model}')
+                central_gamma = uniform_filter1d(central_gamma, size=3, mode='nearest')
+            
+            # Plot only the central tendency line
+            # Use symmetric x_aligned for Panel C (gamma uses symmetric window)
+            ax_c.plot(x_aligned_symmetric, central_gamma, color=colors[model], linewidth=2.5,
+                      label=f'{model}')
     
     ax_c.axvline(0, color='black', linestyle='--', alpha=0.7, linewidth=2)
     ax_c.set_xlabel('Trials relative to reversal', fontsize=11)
     ax_c.set_ylabel('Effective γₜ', fontsize=11)
     ax_c.set_title(f'C. Precision Dynamics Around Reversals\n(run {run_idx})', fontsize=12, fontweight='bold')
-    ax_c.legend(loc='best', fontsize=9)
+    ax_c.legend(loc='upper left', fontsize=9)
     ax_c.grid(True, alpha=0.3)
     
     # =========================================================================
@@ -406,58 +550,143 @@ def create_mechanistic_figure(data: dict, output_path: str, run_idx: int = 0):
     ax_e.set_title(f'E. Context-Conditional Hint-Seeking: M3\n(run {run_idx})', fontsize=12, fontweight='bold')
     ax_e.set_xticks(x_pos_single)
     ax_e.set_xticklabels(['M3'])
-    ax_e.legend(loc='upper right', fontsize=9)
+    ax_e.legend(loc='upper left', fontsize=9)
     ax_e.grid(True, alpha=0.3, axis='y')
     ax_e.set_ylim(0, 1)
     
     # =========================================================================
-    # Panel F: Micro-Reversal Behavior (Zoomed Volatile Period)
+    # Panel F: Profile Stability in Pure Volatile Context (Fresh Simulations)
     # =========================================================================
     ax_f = fig.add_subplot(gs[1, 2])
     
-    # Use same run
-    df = data['M3'][run_idx]
+    # Load recovered M3 parameters from model recovery results
+    recovered_params = None
+    if results_dir:
+        recovered_params = _load_recovered_m3_params(results_dir, run_idx=0)
     
-    # Find a volatile period with at least 50 trials
-    volatile_mask = df['true_context'] == 'volatile'
-    volatile_indices = df[volatile_mask].index.tolist()
-    
-    if len(volatile_indices) >= 50:
-        # Take trials 10-60 of volatile period to show micro-reversals
-        start_idx = volatile_indices[10] if len(volatile_indices) > 10 else volatile_indices[0]
-        end_idx = min(start_idx + 50, volatile_indices[-1])
+    if recovered_params is not None:
+        # Run 5 fresh simulations in volatile-only context
+        num_runs = 10
+        num_trials = 200
+        all_p0_traces = []
+        all_p1_traces = []
         
-        segment = df.loc[start_idx:end_idx].copy()
-        x_seg = np.arange(len(segment))
+        print(f"\nPanel F: Running {num_runs} fresh simulations in volatile context ({num_trials} trials each)")
         
-        # Plot profile weights
-        p0_vals = segment['belief_volatile'].values
-        p1_vals = segment['belief_stable'].values
+        from src.environment import TwoArmedBandit
+        from src.models.agent_wrapper import AgentRunner, run_episode
+        from src.models import make_value_fn
+        from config.experiment_config import (
+            PROBABILITY_HINT, VOLATILE_REWARD_BETTER, VOLATILE_REWARD_WORSE,
+            STABLE_REWARD_BETTER, STABLE_REWARD_WORSE, VOLATILE_SWITCH_INTERVAL,
+            OBSERVATION_HINTS, OBSERVATION_REWARDS, OBSERVATION_CHOICES,
+            ACTION_CHOICES, ACTION_CONTEXTS, ACTION_BETTER_ARM, M3_DEFAULTS
+        )
+        from pymdp.agent import Agent
+        from pymdp import utils
         
-        ax_f.plot(x_seg, p0_vals, color=colors['profile_0'], 
-                  linewidth=2, label='w₀ (Volatile profile)')
-        ax_f.plot(x_seg, p1_vals, color=colors['profile_1'],
-                  linewidth=2, label='w₁ (Stable profile)')
+        # Build A, B, D matrices
+        from src.utils.recovery_helpers import build_abd
+        A, B, D = build_abd()
         
-        # Mark micro-reversals (arm switches every 10 trials)
-        for i, (idx, row) in enumerate(segment.iterrows()):
-            if i > 0 and i % 10 == 0:
-                ax_f.axvline(i, color='gray', linestyle=':', alpha=0.5)
+        # Get policies for M3
+        C_temp = utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
+        temp_agent = Agent(A=A, B=B, C=C_temp, D=D,
+                         policy_len=2, inference_horizon=1,
+                         control_fac_idx=[2],
+                         use_utility=True,
+                         use_states_info_gain=True,
+                         action_selection="stochastic", gamma=16)
+        policies = temp_agent.policies
+        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
         
-        ax_f.set_xlabel('Trial (within volatile context)', fontsize=11)
+        # Create profiles from recovered parameters
+        profiles = _create_m3_profiles_from_recovered(recovered_params)
+        
+        # Create value function
+        value_fn = make_value_fn('M3', 
+                                profiles=profiles,
+                                Z=np.array(M3_DEFAULTS['Z']),
+                                policies=policies,
+                                num_actions_per_factor=num_actions_per_factor)
+        
+        # Run simulations
+        for sim_run in range(num_runs):
+            # Create environment that stays in volatile context
+            # Empty reversal_schedule means no context reversals
+            env = TwoArmedBandit(
+                context='volatile',  # Start in volatile
+                probability_hint=PROBABILITY_HINT,
+                volatile_reward_better=VOLATILE_REWARD_BETTER,
+                volatile_reward_worse=VOLATILE_REWARD_WORSE,
+                stable_reward_better=STABLE_REWARD_BETTER,
+                stable_reward_worse=STABLE_REWARD_WORSE,
+                volatile_switch_interval=VOLATILE_SWITCH_INTERVAL,
+                reversal_schedule=[],  # No context reversals - stays volatile
+                observation_hints=OBSERVATION_HINTS,
+                observation_rewards=OBSERVATION_REWARDS
+            )
+            
+            # Create agent runner
+            runner = AgentRunner(A, B, D, value_fn,
+                               OBSERVATION_HINTS, OBSERVATION_REWARDS,
+                               OBSERVATION_CHOICES, ACTION_CHOICES)
+            
+            # Run episode
+            logs = run_episode(runner, env, T=num_trials, verbose=False)
+            
+            # Extract profile weights (belief_volatile = w0, belief_stable = w1)
+            # logs['belief'] already contains qs[0] (context beliefs), so each element is the context array
+            p0_trace = [qs[0] for qs in logs['belief']]  # q_context[0] = volatile belief
+            p1_trace = [qs[1] for qs in logs['belief']]  # q_context[1] = stable belief
+            
+            all_p0_traces.append(p0_trace)
+            all_p1_traces.append(p1_trace)
+        
+        # Average across runs
+        p0_array = np.array(all_p0_traces)  # Shape: (num_runs, num_trials)
+        p1_array = np.array(all_p1_traces)
+        
+        p0_mean = np.mean(p0_array, axis=0)
+        p1_mean = np.mean(p1_array, axis=0)
+        p0_se = np.std(p0_array, axis=0) / np.sqrt(num_runs)
+        p1_se = np.std(p1_array, axis=0) / np.sqrt(num_runs)
+        
+        x_trials = np.arange(num_trials)
+        
+        # Plot with confidence intervals
+        ax_f.fill_between(x_trials, p0_mean - p0_se, p0_mean + p0_se,
+                         color=colors['profile_0'], alpha=0.2, label=None)
+        ax_f.fill_between(x_trials, p1_mean - p1_se, p1_mean + p1_se,
+                         color=colors['profile_1'], alpha=0.2, label=None)
+        
+        ax_f.plot(x_trials, p0_mean, color=colors['profile_0'], 
+                  linewidth=2.5, label='w₀ (Volatile profile)')
+        ax_f.plot(x_trials, p1_mean, color=colors['profile_1'],
+                  linewidth=2.5, label='w₁ (Stable profile)')
+        
+        # Mark expected micro-reversals (arm switches every 10 trials)
+        for pos in range(10, num_trials, 10):
+            ax_f.axvline(pos, color='gray', linestyle=':', alpha=0.3, linewidth=1)
+        
+        # Reference line at 0.5
+        ax_f.axhline(0.5, color='gray', linestyle='--', alpha=0.3, linewidth=0.5)
+        
+        ax_f.set_xlabel('Trial (volatile context)', fontsize=11)
         ax_f.set_ylabel('Profile weight', fontsize=11)
-        ax_f.set_title(f'F. Profile Stability During Micro-Reversals\n(run {run_idx})',
+        ax_f.set_title(f'F. Profile Stability During Micro-Reversals\n(no context reversals; arm switches every 10 trials, n={num_runs})',
                        fontsize=12, fontweight='bold')
-        ax_f.legend(loc='best', fontsize=9)
-        
-        # Zoom y-axis to show variation
-        all_vals = np.concatenate([p0_vals, p1_vals])
-        y_min, y_max = all_vals.min(), all_vals.max()
-        y_margin = (y_max - y_min) * 0.15
-        ax_f.set_ylim(y_min - y_margin, y_max + y_margin)
+        ax_f.legend(loc='upper left', fontsize=9)
+        ax_f.set_ylim(0, 1)
         ax_f.grid(True, alpha=0.3)
+        
+        # Print diagnostics
+        print(f"  Profile weights (averaged across {num_runs} runs):")
+        print(f"    w₀: mean={p0_mean.mean():.3f}, std={p0_mean.std():.3f}, range=[{p0_mean.min():.3f}, {p0_mean.max():.3f}]")
+        print(f"    w₁: mean={p1_mean.mean():.3f}, std={p1_mean.std():.3f}, range=[{p1_mean.min():.3f}, {p1_mean.max():.3f}]")
+        
     else:
-        ax_f.text(0.5, 0.5, 'Insufficient volatile\ntrials for analysis', 
+        ax_f.text(0.5, 0.5, 'Could not load recovered\nparameters for Panel F', 
                   ha='center', va='center', transform=ax_f.transAxes)
         ax_f.set_title('F. Profile Stability During Micro-Reversals',
                        fontsize=12, fontweight='bold')
@@ -545,8 +774,7 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
         'profile_0': '#E74C3C',
         'profile_1': '#3498DB',
     }
-    
-    window = 10
+    window = 20
     x_aligned = np.arange(-window, window)
     
     # Get single run data for M3
@@ -563,29 +791,47 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
         print(f"Number of reversals found: {len(v2s_data['profile_0'])}")
         
         if len(v2s_data['profile_0']) > 0:
+            # Stack arrays for computing statistics
+            p0_array = np.array(v2s_data['profile_0'])
+            p1_array = np.array(v2s_data['profile_1'])
+            
+            # Compute mean and standard error
+            p0_mean = np.mean(p0_array, axis=0)
+            p1_mean = np.mean(p1_array, axis=0)
+            p0_se = np.std(p0_array, axis=0) / np.sqrt(len(p0_array))
+            p1_se = np.std(p1_array, axis=0) / np.sqrt(len(p1_array))
+            
+            # Print debug info (but don't plot individual lines)
             for i, (p0, p1) in enumerate(zip(v2s_data['profile_0'], v2s_data['profile_1'])):
                 print(f"  Reversal {i}: p0 range [{p0.min():.3f}, {p0.max():.3f}], p1 range [{p1.min():.3f}, {p1.max():.3f}]")
-                alpha = 0.6 if len(v2s_data['profile_0']) > 1 else 1.0
-                label_p0 = 'w₀ (Volatile profile)' if i == 0 else None
-                label_p1 = 'w₁ (Stable profile)' if i == 0 else None
-                ax.plot(x_aligned, p0, color=colors['profile_0'], linewidth=2, alpha=alpha, label=label_p0)
-                ax.plot(x_aligned, p1, color=colors['profile_1'], linewidth=2, alpha=alpha, label=label_p1)
+            
+            # Plot mean lines with confidence intervals
+            ax.fill_between(x_aligned, p0_mean - p0_se, p0_mean + p0_se,
+                           color=colors['profile_0'], alpha=0.2, label=None)
+            ax.fill_between(x_aligned, p1_mean - p1_se, p1_mean + p1_se,
+                           color=colors['profile_1'], alpha=0.2, label=None)
+            
+            ax.plot(x_aligned, p0_mean, color=colors['profile_0'], linewidth=2.5,
+                   label='w₀ (Volatile profile)', zorder=10)
+            ax.plot(x_aligned, p1_mean, color=colors['profile_1'], linewidth=2.5,
+                   label='w₁ (Stable profile)', zorder=10)
             
             ax.axvline(0, color='black', linestyle='--', alpha=0.7, linewidth=2, label='Reversal')
             n = len(v2s_data['profile_0'])
             ax.set_title(f'A. Profile Recruitment: Volatile → Stable\n(n={n} reversal{"s" if n > 1 else ""}, run {run_idx})')
             
-            # Auto y-axis from data
-            all_vals = np.concatenate(v2s_data['profile_0'] + v2s_data['profile_1'])
+            # Auto y-axis from mean ± SE
+            all_vals = np.concatenate([p0_mean - p0_se, p0_mean + p0_se,
+                                       p1_mean - p1_se, p1_mean + p1_se])
             y_min, y_max = all_vals.min(), all_vals.max()
             margin = max(0.05, (y_max - y_min) * 0.1)
-            ax.set_ylim(y_min - margin, y_max + margin)
+            ax.set_ylim(max(0, y_min - margin), min(1, y_max + margin))
         else:
             ax.text(0.5, 0.5, 'No volatile→stable reversals found', ha='center', va='center', transform=ax.transAxes)
         
         ax.set_xlabel('Trials relative to reversal')
-        ax.set_ylabel('Profile weight (belief about context)')
-        ax.legend(loc='best')
+        ax.set_ylabel('Profile weight')
+        ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3)
         
     elif panel.upper() == 'B':
@@ -596,28 +842,47 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
         print(f"Number of reversals found: {len(s2v_data['profile_0'])}")
         
         if len(s2v_data['profile_0']) > 0:
+            # Stack arrays for computing statistics
+            p0_array = np.array(s2v_data['profile_0'])
+            p1_array = np.array(s2v_data['profile_1'])
+            
+            # Compute mean and standard error
+            p0_mean = np.mean(p0_array, axis=0)
+            p1_mean = np.mean(p1_array, axis=0)
+            p0_se = np.std(p0_array, axis=0) / np.sqrt(len(p0_array))
+            p1_se = np.std(p1_array, axis=0) / np.sqrt(len(p1_array))
+            
+            # Print debug info (but don't plot individual lines)
             for i, (p0, p1) in enumerate(zip(s2v_data['profile_0'], s2v_data['profile_1'])):
                 print(f"  Reversal {i}: p0 range [{p0.min():.3f}, {p0.max():.3f}], p1 range [{p1.min():.3f}, {p1.max():.3f}]")
-                alpha = 0.6 if len(s2v_data['profile_0']) > 1 else 1.0
-                label_p0 = 'w₀ (Volatile profile)' if i == 0 else None
-                label_p1 = 'w₁ (Stable profile)' if i == 0 else None
-                ax.plot(x_aligned, p0, color=colors['profile_0'], linewidth=2, alpha=alpha, label=label_p0)
-                ax.plot(x_aligned, p1, color=colors['profile_1'], linewidth=2, alpha=alpha, label=label_p1)
+            
+            # Plot mean lines with confidence intervals
+            ax.fill_between(x_aligned, p0_mean - p0_se, p0_mean + p0_se,
+                           color=colors['profile_0'], alpha=0.2, label=None)
+            ax.fill_between(x_aligned, p1_mean - p1_se, p1_mean + p1_se,
+                           color=colors['profile_1'], alpha=0.2, label=None)
+            
+            ax.plot(x_aligned, p0_mean, color=colors['profile_0'], linewidth=2.5,
+                   label='w₀ (Volatile profile)', zorder=10)
+            ax.plot(x_aligned, p1_mean, color=colors['profile_1'], linewidth=2.5,
+                   label='w₁ (Stable profile)', zorder=10)
             
             ax.axvline(0, color='black', linestyle='--', alpha=0.7, linewidth=2, label='Reversal')
             n = len(s2v_data['profile_0'])
             ax.set_title(f'B. Profile Recruitment: Stable → Volatile\n(n={n} reversal{"s" if n > 1 else ""}, run {run_idx})')
             
-            all_vals = np.concatenate(s2v_data['profile_0'] + s2v_data['profile_1'])
+            # Auto y-axis from mean ± SE
+            all_vals = np.concatenate([p0_mean - p0_se, p0_mean + p0_se,
+                                       p1_mean - p1_se, p1_mean + p1_se])
             y_min, y_max = all_vals.min(), all_vals.max()
             margin = max(0.05, (y_max - y_min) * 0.1)
-            ax.set_ylim(y_min - margin, y_max + margin)
+            ax.set_ylim(max(0, y_min - margin), min(1, y_max + margin))
         else:
             ax.text(0.5, 0.5, 'No stable→volatile reversals found', ha='center', va='center', transform=ax.transAxes)
         
         ax.set_xlabel('Trials relative to reversal')
-        ax.set_ylabel('Profile weight (belief about context)')
-        ax.legend(loc='best')
+        ax.set_ylabel('Profile weight')
+        ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3)
         
     elif panel.upper() == 'C':
@@ -633,8 +898,17 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
                 gamma_traces.extend(aligned[rev_type]['gamma'])
             
             if gamma_traces:
-                # Use median for all models to avoid artifacts
-                central_gamma = np.median(gamma_traces, axis=0)
+                # Convert to numpy array for easier handling
+                gamma_array = np.array(gamma_traces)
+                
+                # For M1, gamma should be constant, so use mean (should be same across all traces)
+                # For M2 and M3, use median to avoid artifacts from jumps
+                if model == 'M1':
+                    # M1 has constant gamma, so just use the mean across all traces
+                    central_gamma = np.mean(gamma_array, axis=0)
+                else:
+                    # Use median for M2 and M3 to avoid artifacts
+                    central_gamma = np.median(gamma_array, axis=0)
                 
                 # Apply smoothing to M2 to reduce noise
                 if model == 'M2':
@@ -642,10 +916,7 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
                 
                 print(f"  {model}: gamma range [{central_gamma.min():.3f}, {central_gamma.max():.3f}], central={central_gamma.mean():.3f}")
                 
-                # Reduce alpha for M2 individual traces
-                trace_alpha = 0.2 if model == 'M2' else 0.3
-                for trace in gamma_traces:
-                    ax.plot(x_aligned, trace, color=colors[model], linewidth=1, alpha=trace_alpha)
+                # Plot only the central tendency line (no individual traces)
                 ax.plot(x_aligned, central_gamma, color=colors[model], linewidth=2.5, label=f'{model}')
             else:
                 print(f"  {model}: No gamma traces found")
@@ -654,7 +925,7 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
         ax.set_xlabel('Trials relative to reversal')
         ax.set_ylabel('Effective γₜ')
         ax.set_title(f'C. Precision Dynamics Around Reversals (run {run_idx})')
-        ax.legend(loc='best')
+        ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3)
         
     elif panel.upper() == 'D':
@@ -710,7 +981,7 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
         ax.set_title(f'E. Context-Conditional Hint-Seeking (run {run_idx})')
         ax.set_xticks(x_pos)
         ax.set_xticklabels(['M1', 'M2', 'M3'])
-        ax.legend(loc='upper right')
+        ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3, axis='y')
         ax.set_ylim(0, 1)
         
@@ -748,7 +1019,7 @@ def create_single_panel(data: dict, panel: str, output_path: str, run_idx: int =
             ax.set_xlabel('Trial (within volatile context)')
             ax.set_ylabel('Profile weight')
             ax.set_title(f'F. Profile Stability During Micro-Reversals (run {run_idx})')
-            ax.legend(loc='best')
+            ax.legend(loc='upper left')
             
             all_vals = np.concatenate([p0_vals, p1_vals])
             y_min, y_max = all_vals.min(), all_vals.max()
@@ -778,7 +1049,7 @@ def main():
     parser.add_argument(
         '--results-dir',
         type=str,
-        default='results/model_recovery/run_20251125_142037',
+        default='results/model_recovery/run_20251129_210825',
         help='Path to model recovery results directory'
     )
     parser.add_argument(
@@ -818,7 +1089,7 @@ def main():
     
     # Create figure(s)
     if args.panel.lower() == 'all':
-        create_mechanistic_figure(data, args.output, run_idx=0)
+        create_mechanistic_figure(data, args.output, run_idx=0, results_dir=args.results_dir)
     else:
         create_single_panel(data, args.panel, args.output, run_idx=0)
 

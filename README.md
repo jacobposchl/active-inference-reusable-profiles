@@ -101,7 +101,8 @@ After a run you will find:
 ## Key Concepts
 
 ### Hidden States
-- **Context Factor**: Which arm is better (left_better / right_better)
+- **Context Factor**: Volatility regime (volatile vs stable) - determines how frequently the better arm switches
+- **Better Arm Factor**: Which arm is currently better (left_better / right_better) - this is what hints reveal
 - **Choice Factor**: Current position in task (start / hint / left / right)
 
 ### Models
@@ -114,7 +115,7 @@ After a run you will find:
 **M2: Dynamic Global Precision**
 - Policy precision decreases with belief entropy
 - Global adaptation based on uncertainty
-- Formula: γ(t) = γ_base / (1 + k·H(q(context)))
+- Formula: γ(t) = γ_base / (1 + k·H(q(better_arm)))
 
 **M3: Profile Model**
 - Multiple value profiles with different precision/preference combinations

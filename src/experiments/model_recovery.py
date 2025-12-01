@@ -17,6 +17,7 @@ import argparse
 import os
 import logging
 import shutil
+import json
 import numpy as np
 from tqdm import tqdm
 import sys
@@ -31,6 +32,7 @@ from src.utils.recovery_helpers import (
     write_experiment_metadata,
     MODEL_RECOVERY_BASE,
     _fold_level_path,
+    _metadata_path,
 )
 
 from config.experiment_config import *
@@ -65,7 +67,45 @@ def _load_existing_run_stats(artifact_dir, generator, model_name, run_idx):
         # Calculate AIC/BIC
         from src.utils.model_utils import get_num_parameters
         k_params = get_num_parameters(model_name)
-        num_trials = 80  # default, could be read from metadata
+        
+        # Try to read num_trials from experiment metadata JSON
+        num_trials = None
+        metadata_path = _metadata_path(artifact_dir)
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                    num_trials = metadata.get('num_trials')
+                    # Validate that num_trials is a positive integer
+                    if num_trials is not None and (not isinstance(num_trials, (int, float)) or num_trials <= 0):
+                        num_trials = None
+                    elif num_trials is not None:
+                        num_trials = int(num_trials)
+            except (json.JSONDecodeError, IOError, OSError, ValueError, KeyError) as e:
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to read num_trials from metadata at {metadata_path}: {e}")
+        
+        # Fallback: Calculate from train/test indices in fold CSV
+        if num_trials is None:
+            if 'train_indices' in df.columns and 'test_indices' in df.columns:
+                try:
+                    all_indices = set()
+                    for idx, row in df.iterrows():
+                        train_idx = json.loads(row['train_indices']) if isinstance(row['train_indices'], str) else row['train_indices']
+                        test_idx = json.loads(row['test_indices']) if isinstance(row['test_indices'], str) else row['test_indices']
+                        all_indices.update(train_idx)
+                        all_indices.update(test_idx)
+                    num_trials = len(all_indices)
+                except (json.JSONDecodeError, KeyError, AttributeError) as e:
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Failed to calculate num_trials from fold indices: {e}")
+        
+        # Final fallback: use default
+        if num_trials is None:
+            num_trials = 80
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Using default num_trials=80 for BIC calculation (could not determine from metadata or fold indices)")
+        
         aic = 2 * k_params - 2 * mean_test_ll
         bic = k_params * np.log(max(1, num_trials)) - 2 * mean_test_ll
         
