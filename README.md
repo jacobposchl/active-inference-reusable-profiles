@@ -14,7 +14,7 @@ The project investigates whether agents can improve performance by maintaining m
 
 ```
 reusable_profiles/
-├── README.md                     # This file
+├── README.md                     
 ├── requirements.txt              # Python dependencies
 ├── config/
 │   └── experiment_config.py     # Global configuration parameters
@@ -43,45 +43,19 @@ reusable_profiles/
     └── ...                      # Pytest suites for env/models/experiments
 ```
 
-## Installation
-
-1. Clone or download this repository
-2. Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
 
 ## Usage
 
 ### Model Recovery (Main Experiment)
 
-Launch the cross-validated recovery study via the CLI:
+Launch the cross-validated recovery study
 
 ```bash
 python src/experiments/model_recovery.py \
   --generators M1,M2,M3,egreedy,softmax \
-  --runs-per-generator 20 \
-  --num-trials 80 \
   --seed 1 \
-  --reversal-interval 40 \
   --folds 5
 ```
-
-All arguments have sensible defaults; run `--help` for details. The script prints
-progress with nested `tqdm` bars and writes structured outputs to
-`results/model_recovery/`.
-
-### Smoke Test
-
-Before running the full study you can execute a lightweight sanity check:
-
-```bash
-python test_scripts/smoke_cv_demo.py
-```
-
-This invokes the same CLI with a tiny configuration (two generators, single run)
-to confirm dependencies and logging work end-to-end.
 
 ### Output Layout
 
@@ -98,12 +72,6 @@ After a run you will find:
 - `results/model_recovery/metadata/experiment_summary.json` – metadata describing
   generators, seeds, fold count, and environment settings used in the run.
 
-## Key Concepts
-
-### Hidden States
-- **Context Factor**: Volatility regime (volatile vs stable) - determines how frequently the better arm switches
-- **Better Arm Factor**: Which arm is currently better (left_better / right_better) - this is what hints reveal
-- **Choice Factor**: Current position in task (start / hint / left / right)
 
 ### Models
 
@@ -136,17 +104,7 @@ C_t = softmax(w @ PHI)  # Mixed outcome preferences
 gamma_t = w @ GAMMA  # Mixed precision
 ```
 
-## Tests
-
-The repository includes pytest coverage for the environment, generative model,
-value functions, agent wrapper, log-likelihood utilities, recovery helpers, and
-the top-level `model_recovery` experiment. Run the suite with:
-
-```bash
-pytest
-```
-
-## Citation
+## Pymdp citation
 
 This work builds on the pymdp package:
 
