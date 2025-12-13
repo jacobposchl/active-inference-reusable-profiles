@@ -10,6 +10,7 @@ from pymdp import utils
 class AgentRunner:
     """
     Agent wrapper that handles value profiles and episode execution.
+    Supports both basic stepping and log-likelihood tracking.
     """
     
     def __init__(self, A, B, D, value_fn, observation_hints, observation_rewards,
@@ -54,21 +55,18 @@ class AgentRunner:
         self.action_choices = action_choices
         self.policy_len = policy_len
         
-        # Context is now hidden - no direct observation
         
         self.gamma_t = None
         
-        # Initialize C vector (will be updated each trial)
         C0 = utils.obj_array_zeros([(A[m].shape[0],) for m in range(len(A))])
         
         # Create pymdp Agent
         # With 3 state factors: [context, better_arm, choice]
-        # Only choice (index 2) is controllable
         self.agent = Agent(
             A=A, B=B, C=C0, D=D,
             policy_len=policy_len,
             inference_horizon=inference_horizon,
-            control_fac_idx=[2],  # Only control choice factor (now at index 2)
+            control_fac_idx=[2],  # Only control choice factor
             use_utility=True,
             use_states_info_gain=True,
             action_selection="stochastic",
@@ -79,7 +77,6 @@ class AgentRunner:
         """Convert observation strings to indices.
         
         Handles 3 observation modalities: hints, rewards, choices.
-        Context is now hidden (inferred from reward patterns).
         """
         ids = [
             self.observation_hints.index(obs_labels[0]),
@@ -146,12 +143,6 @@ class AgentRunner:
         action_label = self.action_id_to_label(chosen_action_ids)
         
         return action_label, qs, q_pi, efe, self.gamma_t
-
-
-class AgentRunnerWithLL(AgentRunner):
-    """
-    Extended AgentRunner that tracks action log-likelihoods.
-    """
     
     def step_with_ll(self, obs_ids, t):
         """
@@ -249,7 +240,7 @@ class AgentRunnerWithLL(AgentRunner):
                 else:
                     action_ll = np.logaddexp(action_ll, np.log(q_pi[pi_idx] + 1e-16))
 
-        # CRITICAL: Set the agent's action so beliefs propagate correctly through B
+        # Set the agent's action so beliefs propagate correctly through B
         # for the next trial. Action array: [context_action, better_arm_action, choice_action]
         # Only choice (index 2) is controllable, others are 'rest' (index 0)
         self.agent.action = np.array([0, 0, u_choice])

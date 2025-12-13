@@ -4,8 +4,9 @@ from src.models import build_A, build_B, build_D
 from config.experiment_config import *
 
 
-def simulate_baseline_run(env, policy_type, T=200, seed=None, epsilon=0.1, temp=1.0, alpha=0.1):
-    """Simulate a simple baseline controller (epsilon-greedy or softmax Q-learner).
+def simulate_baseline_run(env, policy_type, T=400, seed=None, epsilon=0.1, temp=1.0, alpha=0.1):
+    """
+    Simulate a simple baseline controller (epsilon-greedy or softmax Q-learner).
 
     Returns logs dict compatible with `run_episode_with_ll` output so it can
     be used as a reference trajectory for teacher-forcing evaluation.
@@ -18,6 +19,7 @@ def simulate_baseline_run(env, policy_type, T=200, seed=None, epsilon=0.1, temp=
     logs = {
         't': [],
         'context': [],
+        'current_better_arm': [],  # Track which arm is actually better
         'belief': [],
         'gamma': [],
         'action': [],
@@ -68,6 +70,7 @@ def simulate_baseline_run(env, policy_type, T=200, seed=None, epsilon=0.1, temp=
         # Log
         logs['t'].append(t)
         logs['context'].append(env.context)
+        logs['current_better_arm'].append(getattr(env, 'current_better_arm', None))
         logs['belief'].append(zero_belief.copy())
         logs['gamma'].append(np.nan)
         logs['action'].append(action_label)
@@ -76,27 +79,4 @@ def simulate_baseline_run(env, policy_type, T=200, seed=None, epsilon=0.1, temp=
         logs['choice_label'].append(obs_labels[2])
         logs['ll'].append(0.0)
 
-    return logs
-
-
-def run_single_agent(model_name, A, B, D, num_trials, seed=None, reversal_schedule=None):
-    """Run a single agent for one episode."""
-    if seed is not None:
-        np.random.seed(seed)
-    
-    env = TwoArmedBandit(
-        probability_hint=PROBABILITY_HINT,
-        probability_reward=PROBABILITY_REWARD,
-        reversal_schedule=reversal_schedule if reversal_schedule is not None else DEFAULT_REVERSAL_SCHEDULE
-    )
-    
-    from src.utils.model_utils import create_model
-    from src.models import AgentRunnerWithLL, run_episode_with_ll
-
-    value_fn = create_model(model_name, A, B, D)
-    runner = AgentRunnerWithLL(A, B, D, value_fn,
-                        OBSERVATION_HINTS, OBSERVATION_REWARDS,
-                        OBSERVATION_CHOICES, ACTION_CHOICES,
-                        reward_mod_idx=1)
-    logs = run_episode_with_ll(runner, env, T=num_trials, verbose=False)
     return logs

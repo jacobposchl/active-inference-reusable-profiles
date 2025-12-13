@@ -13,12 +13,7 @@ Model adaptation mechanisms:
 
 import numpy as np
 from pymdp.maths import softmax
-
-
-def _compute_entropy(q):
-    """Compute entropy of a probability distribution."""
-    p = np.clip(np.asarray(q, float), 1e-12, 1.0)
-    return -(p * np.log(p)).sum()
+from src.utils.helpers import compute_entropy
 
 
 def make_values_M1(C_reward_logits=None, gamma=1.0, E_logits=None):
@@ -111,7 +106,7 @@ def make_values_M2(C_reward_logits=None, gamma_schedule=None, E_logits=None):
         # Use entropy of better_arm beliefs (qs[1]) for precision modulation
         assert len(qs) >= 2, f"Expected at least 2 state factors, got {len(qs)}"
         q_better_arm = qs[1]
-        H_better_arm = _compute_entropy(q_better_arm)
+        H_better_arm = compute_entropy(q_better_arm)
         
         C_t = softmax(C_logits)
         E_t = None if E_logits is None else softmax(E_logits)

@@ -37,7 +37,7 @@ from src.utils.simulate import simulate_baseline_run
 from src.models.agent_wrapper import run_episode_with_ll
 from config.experiment_config import *
 from src.environment import TwoArmedBandit
-from src.models import AgentRunnerWithLL
+from src.models import AgentRunner
 from src.utils.helpers import compute_entropy, find_reversals
 
 MODEL_RECOVERY_BASE = os.path.join('results', 'model_recovery')
@@ -189,7 +189,7 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
 
             if gen in ('M1', 'M2', 'M3'):
                 value_fn = create_model(gen, A, B, D)
-                runner = AgentRunnerWithLL(
+                runner = AgentRunner(
                     A, B, D, value_fn,
                     OBSERVATION_HINTS, OBSERVATION_REWARDS,
                     OBSERVATION_CHOICES, ACTION_CHOICES,
@@ -202,7 +202,7 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
                                                  epsilon=0.1, temp=1.0, alpha=0.1)
             else:
                 value_fn = create_model('M3', A, B, D)
-                runner = AgentRunnerWithLL(
+                runner = AgentRunner(
                     A, B, D, value_fn,
                     OBSERVATION_HINTS, OBSERVATION_REWARDS,
                     OBSERVATION_CHOICES, ACTION_CHOICES,
@@ -1060,10 +1060,10 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
 
     Returns list of dict rows with per-trial fields used for CSV export.
     """
-    from src.models.agent_wrapper import AgentRunnerWithLL
+    from src.models.agent_wrapper import AgentRunner
     from src.utils.helpers import find_reversals
 
-    runner = AgentRunnerWithLL(A, B, D, value_fn,
+    runner = AgentRunner(A, B, D, value_fn,
                                OBSERVATION_HINTS, OBSERVATION_REWARDS,
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)

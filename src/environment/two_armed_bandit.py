@@ -1,9 +1,5 @@
 """
 Two-armed bandit environment with context-dependent volatility.
-
-NEW DESIGN: Contexts represent VOLATILITY REGIMES, not which arm is better.
-- 'volatile' context: Arms switch which is better every 10 trials
-- 'stable' context: Arms stay fixed for long periods
 """
 
 import numpy as np
@@ -15,7 +11,7 @@ class TwoArmedBandit:
     
     The hidden context determines the volatility regime:
     - 'volatile': Which arm is better switches every N trials (micro-reversals)
-    - 'stable': Which arm is better stays fixed for long periods
+    - 'stable': Which arm is better stays fixed
     
     Context switches occur at specified reversal_schedule trials.
     """
@@ -143,8 +139,7 @@ class TwoArmedBandit:
             [hint_obs, reward_obs, choice_obs]
             Context is now hidden - agent must infer it from reward patterns.
         """
-        # Increment trial count FIRST before checking reversals
-        # This ensures reversals happen at the correct trial indices
+        
         self.trial_count += 1
         
         # Check for context reversals (volatile <-> stable)
@@ -164,12 +159,12 @@ class TwoArmedBandit:
         
         # Did we ask for a hint? 
         elif action == "act_hint":
-            # Hint tells which arm is CURRENTLY better (accurate regardless of context)
+            # Hint tells which arm is better
             if self.current_better_arm == "left":
                 observed_hint = self.observation_hints[
                     utils.sample(np.array([0.0, self.probability_hint, 1.0 - self.probability_hint]))
                 ]
-            else:  # right is better
+            else:
                 observed_hint = self.observation_hints[
                     utils.sample(np.array([0.0, 1.0 - self.probability_hint, self.probability_hint]))
                 ]
@@ -199,6 +194,5 @@ class TwoArmedBandit:
         else:
             raise ValueError(f"Unknown action: {action}")
         
-        # Context is now hidden - no direct observation
         observations = [observed_hint, observed_reward, observed_choice]
         return observations

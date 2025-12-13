@@ -12,8 +12,8 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
     observed history). Returns a list of per-trial log-likelihoods.
     """
     value_fn = create_model(model_name, A, B, D)
-    from src.models import AgentRunnerWithLL
-    runner = AgentRunnerWithLL(A, B, D, value_fn,
+    from src.models import AgentRunner
+    runner = AgentRunner(A, B, D, value_fn,
                                OBSERVATION_HINTS, OBSERVATION_REWARDS,
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)
@@ -43,8 +43,8 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
 
 def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
     """Compute total log-likelihood of ref_logs under a model defined by value_fn."""
-    from src.models import AgentRunnerWithLL
-    runner = AgentRunnerWithLL(A, B, D, value_fn,
+    from src.models import AgentRunner
+    runner = AgentRunner(A, B, D, value_fn,
                                OBSERVATION_HINTS, OBSERVATION_REWARDS,
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)
