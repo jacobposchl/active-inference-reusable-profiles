@@ -25,7 +25,6 @@ def build_A(num_modalities,
     Build likelihood matrix A: p(o_t | s_t).
     
     Handles 3 state factors: context, better_arm, choice.
-    Context is now a HIDDEN state - agent infers it from reward patterns.
     
     Parameters:
     -----------
@@ -72,7 +71,7 @@ def build_A(num_modalities,
     A = utils.obj_array(num_modalities)
     
     # =========================================================================
-    # A[0]: Hint observations - depends on better_arm state, NOT on context
+    # A[0]: Hint observations - depends on better_arm state, not on context
     # =========================================================================
     # Shape: (n_hint_obs, n_contexts, n_better_arm, n_choices)
     A_hint = np.zeros((len(observation_hints), n_contexts, n_better_arm, n_choices))
@@ -92,7 +91,7 @@ def build_A(num_modalities,
                 A_hint[0, ctx_idx, :, choice_idx] = 1.0  # null hint
     
     # =========================================================================
-    # A[1]: Reward observations - depends on better_arm, choice, AND CONTEXT
+    # A[1]: Reward observations - depends on better_arm, choice, and context
     # =========================================================================
     # Shape: (n_reward_obs, n_contexts, n_better_arm, n_choices)
     # Reward probabilities differ by context:
@@ -205,33 +204,17 @@ def build_B(state_contexts, state_better_arm, state_choices,
                         B_context[i, j, a] = context_volatility / (n_contexts - 1)
     
     # =========================================================================
-    # B[1]: Better arm transitions - DEPENDS ON CONTEXT
+    # B[1]: Better arm transitions
     # =========================================================================
-    # This is the key fix: arm switches are MORE LIKELY in volatile context
     # Shape: (n_better_arm, n_better_arm, n_action_arm)
-    # But we need it to depend on context... 
+    # Transition probabilities for which arm is better (left_better <-> right_better).
     # 
-    # In pyMDP, B[f] has shape (n_states[f], n_states[f], n_actions[f])
-    # To make it context-dependent, we need to expand the action space or
-    # use a different mechanism.
-    #
-    # WORKAROUND: Use a single B_better_arm with AVERAGE switch probability,
-    # and let the agent learn context through observation patterns.
-    # 
-    # Better approach: The agent's belief about arm switching should reflect
-    # its belief about context. We encode this through the overall switch rate.
-    #
-    # For a proper implementation, we'd need factorized B matrices or
-    # a different state representation. For now, use moderate switch probability.
-    
-    # Actually, we CAN make this work by having the agent use its BELIEF about
-    # context to weight its predictions. But that requires custom inference.
-    #
-    # Simpler approach: Use a moderate arm switch probability that lets the
-    # agent update its better_arm beliefs through observations (hints/rewards)
-    
-    # For the agent's generative model, use a moderate belief about arm switches
-    avg_switch_prob = 0.05  # Agent believes arms switch occasionally
+    # Note: Due to pymdp's factorized B matrix structure, better_arm transitions
+    # cannot directly depend on context state. We use a fixed moderate switch
+    # probability (0.05) as a compromise. The agent learns which arm is better
+    # primarily through observations (hints and rewards), which strongly dominate
+    # inference over the transition prior.
+    avg_switch_prob = 0.05  # Fixed probability of arm switch per trial
     
     B_better_arm = np.zeros((n_better_arm, n_better_arm, n_action_arm))
     for a in range(n_action_arm):

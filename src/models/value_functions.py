@@ -109,7 +109,8 @@ def make_values_M2(C_reward_logits=None, gamma_schedule=None, E_logits=None):
             Trial number
         """
         # Use entropy of better_arm beliefs (qs[1]) for precision modulation
-        q_better_arm = qs[1] if len(qs) > 1 else qs[0]
+        assert len(qs) >= 2, f"Expected at least 2 state factors, got {len(qs)}"
+        q_better_arm = qs[1]
         H_better_arm = _compute_entropy(q_better_arm)
         
         C_t = softmax(C_logits)
@@ -130,8 +131,6 @@ def make_values_M3(profiles, Z, num_policies=None, policies=None, num_actions_pe
     - Believe volatile → Profile 0 (exploratory, hint-seeking, lower gamma)
     - Believe stable → Profile 1 (exploitative, higher gamma)
     
-    Context is now OBSERVABLE through reward probability patterns, so
-    beliefs about context actually update during inference.
     
     Parameters:
     -----------
@@ -156,7 +155,7 @@ def make_values_M3(profiles, Z, num_policies=None, policies=None, num_actions_pe
         Value function that returns (C_t, E_t, gamma_t)
     """
 
-    K = len(profiles)  # Number of profiles
+    K = len(profiles)
     if K != 2:
         raise ValueError(f"M3 requires exactly 2 profiles (exploratory, exploitative), got {K}")
     
@@ -164,12 +163,21 @@ def make_values_M3(profiles, Z, num_policies=None, policies=None, num_actions_pe
     Z_mat = np.asarray(Z, float)
     Z_mat = Z_mat / (Z_mat.sum(axis=1, keepdims=True) + 1e-12)
     
+    # Validate required profile parameters
+    required_keys = ['phi_logits', 'gamma']
+    for i, p in enumerate(profiles):
+        missing = [key for key in required_keys if key not in p]
+        if missing:
+            raise ValueError(f"Profile {i} missing required keys: {missing}. "
+                           f"Each profile must contain 'phi_logits' (outcome preferences) "
+                           f"and 'gamma' (policy precision).")
+    
     # Extract profile parameters
     # Shape: (2 profiles, 3 reward outcomes)
     PHI = np.stack([np.asarray(p['phi_logits'], float) for p in profiles], axis=0)
     GAM = np.array([float(p['gamma']) for p in profiles])
     
-    # Check if profiles have policy priors
+    # Check if profiles have policy priors (optional)
     has_xi = all('xi_logits' in p for p in profiles)
     
     if has_xi:
@@ -241,8 +249,7 @@ def make_values_M3(profiles, Z, num_policies=None, policies=None, num_actions_pe
     return value_fn
 
 
-def map_action_prefs_to_policy_prefs(xi_logits_per_action, policies, 
-                                     num_actions_per_factor):
+def map_action_prefs_to_policy_prefs(xi_logits_per_action, policies, num_actions_per_factor):
     """
     Map action-level preferences to policy-level preferences.
     
@@ -263,6 +270,7 @@ def map_action_prefs_to_policy_prefs(xi_logits_per_action, policies,
     policy_logits : np.ndarray, shape (num_policies,)
         Log preferences for each policy
     """
+
     xi = np.asarray(xi_logits_per_action, dtype=float)
     num_policies = len(policies)
     policy_logits = np.zeros(num_policies)
@@ -272,9 +280,9 @@ def map_action_prefs_to_policy_prefs(xi_logits_per_action, policies,
         # Factor 2 is choice factor (factors: context, better_arm, choice)
         # Sum log preferences across timesteps
         log_pref = 0.0
-        for t in range(policy.shape[0]):
-            action_idx = int(policy[t, 2])  # Factor 2 is choice factor
-            log_pref += xi[action_idx]
+        for t in range(policy.shape[0]): # loop through each timestep in the policy
+            action_idx = int(policy[t, 2])  # Get the action at timestep t (choice factor)
+            log_pref += xi[action_idx] # Sum the log preferences 
         
         policy_logits[pol_idx] = log_pref
     

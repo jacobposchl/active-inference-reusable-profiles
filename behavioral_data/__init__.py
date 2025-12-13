@@ -1,2 +1,0 @@
-"""Behavioral data analysis package."""
-

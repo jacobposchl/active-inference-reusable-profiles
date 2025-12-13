@@ -7,9 +7,9 @@ Global configuration parameters for all experiments.
 # =============================================================================
 # The agent tracks 3 hidden state factors:
 # 1. CONTEXT: Volatility regime (volatile vs stable) - HIDDEN STATE
-#    - 'volatile': Better arm switches frequently (every ~10 trials)
+#    - 'volatile': Better arm switches frequently
 #    - 'stable': Better arm stays fixed for long periods
-#    - Agent infers context from reward probability patterns (70/30 vs 90/10)
+#    - Agent infers context from reward probability patterns
 #
 # 2. BETTER_ARM: Which arm currently has higher reward probability
 #    - 'left_better': Left arm is currently better
@@ -20,17 +20,16 @@ Global configuration parameters for all experiments.
 #    - Tracks what action was taken (start, hint, left, right)
 
 STATE_CONTEXTS = ['volatile', 'stable']
-STATE_BETTER_ARM = ['left_better', 'right_better']  # NEW: tracks which arm is better
+STATE_BETTER_ARM = ['left_better', 'right_better']
 STATE_CHOICES = ['start', 'hint', 'left', 'right']
 
-ACTION_CONTEXTS = ['rest']
+ACTION_CONTEXTS = ['rest'] # No direct control over regime context
 ACTION_BETTER_ARM = ['rest']  # No direct control over which arm is better
 ACTION_CHOICES = ['act_start', 'act_hint', 'act_left', 'act_right']
 
 OBSERVATION_HINTS = ['null', 'observe_left_hint', 'observe_right_hint']
 OBSERVATION_REWARDS = ['null', 'observe_loss', 'observe_reward']
 OBSERVATION_CHOICES = ['observe_start', 'observe_hint', 'observe_left', 'observe_right']
-# Context is now a HIDDEN state - agent must infer it from reward patterns
 
 # Derived dimensions - 3 state factors, 3 observation modalities
 NUM_STATES = [len(STATE_CONTEXTS), len(STATE_BETTER_ARM), len(STATE_CHOICES)]
@@ -38,10 +37,12 @@ NUM_ACTIONS = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)
 NUM_OBS = [len(OBSERVATION_HINTS), len(OBSERVATION_REWARDS), len(OBSERVATION_CHOICES)]
 
 NUM_FACTORS = len(NUM_STATES)
-NUM_MODALITIES = len(NUM_OBS)  # Now 3 modalities (context is hidden)
+NUM_MODALITIES = len(NUM_OBS)
 
-# Environment parameters (generative process)
-PROBABILITY_HINT = 0.85  # Hint accuracy (same for both contexts)
+# =============================================================================
+# ENVIRONMENT PARAMETERS (GENERATIVE PROCESS)
+# =============================================================================
+PROBABILITY_HINT = 0.85  # Hint accuracy (same for both volatile and stable contexts)
 
 # Reward probabilities differ by context to create different optimal strategies
 # Volatile context: moderate discrimination (70% vs 30%) + frequent switches
@@ -49,14 +50,29 @@ VOLATILE_REWARD_BETTER = 0.70  # Better arm in volatile context
 VOLATILE_REWARD_WORSE = 0.30   # Worse arm in volatile context
 VOLATILE_SWITCH_INTERVAL = 10  # Arms switch every 10 trials
 
-# Stable context: strong discrimination (90% vs 10%) + rare switches
+# Stable context: strong discrimination (90% vs 10%) with no switches
 STABLE_REWARD_BETTER = 0.90    # Better arm in stable context
 STABLE_REWARD_WORSE = 0.10     # Worse arm in stable context
 
-# Default experiment parameters
-DEFAULT_TRIALS = 800
-DEFAULT_REVERSAL_SCHEDULE = [i for i in range(40, 800, 40)]
-# probability of arm context flipping
+# =============================================================================
+# DEFAULT EXPERIMENT PARAMETERS
+# =============================================================================
+
+# Number of bandit trials per experimental run
+DEFAULT_TRIALS = 400
+
+# Trial indices where the context regime switches between volatile and stable.
+# This controls when the environment changes from one volatility regime to another.
+# Note: This is DIFFERENT from arm switches (which arm is better):
+#   - Context switches: volatile ↔ stable regime changes (controlled here)
+#   - Arm switches: left_better ↔ right_better changes (controlled by VOLATILE_SWITCH_INTERVAL)
+DEFAULT_REVERSAL_SCHEDULE = [i for i in range(40, 400, 40)]
+
+# Agent's generative model parameter: probability per trial that context switches.
+# Used in the B matrix (transition probabilities) to encode the agent's beliefs about
+# how frequently the volatility regime changes. This is the agent's model of the world,
+# NOT the actual environment dynamics (which use deterministic DEFAULT_REVERSAL_SCHEDULE).
+# Value of 0.05 means agent believes 5% chance of context switch per trial.
 DEFAULT_CONTEXT_VOLATILITY = 0.05
 
 
