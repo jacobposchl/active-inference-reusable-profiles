@@ -8,10 +8,7 @@ The script coordinates four stages:
 1. Generate reference trajectories with multiple generators (M1/M2/M3/baselines).
 2. For each run, fit each candidate model via within-run K-fold CV (see recovery_helpers).
 3. Evaluate fitted models on held-out trials and compute per-run metrics (LL, accuracy, AIC/BIC).
-4. Aggregate results into confusion matrices and per-run summaries for publication.
-
-Progress feedback uses nested `tqdm` progress bars: the outer bar tracks runs,
-and inner bars display status for per-model fitting.
+4. Aggregate results into confusion matrices and per-
 """
 import argparse
 import os
@@ -68,46 +65,37 @@ def _load_existing_run_stats(artifact_dir, generator, model_name, run_idx):
         from src.utils.model_utils import get_num_parameters
         k_params = get_num_parameters(model_name)
         
-        # Try to read num_trials from experiment metadata JSON
-        num_trials = None
+        # Read num_trials from experiment metadata JSON
         metadata_path = _metadata_path(artifact_dir)
-        if os.path.exists(metadata_path):
-            try:
-                with open(metadata_path, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
-                    num_trials = metadata.get('num_trials')
-                    # Validate that num_trials is a positive integer
-                    if num_trials is not None and (not isinstance(num_trials, (int, float)) or num_trials <= 0):
-                        num_trials = None
-                    elif num_trials is not None:
-                        num_trials = int(num_trials)
-            except (json.JSONDecodeError, IOError, OSError, ValueError, KeyError) as e:
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to read num_trials from metadata at {metadata_path}: {e}")
-        
-        # Fallback: Calculate from train/test indices in fold CSV
-        if num_trials is None:
-            if 'train_indices' in df.columns and 'test_indices' in df.columns:
-                try:
-                    all_indices = set()
-                    for idx, row in df.iterrows():
-                        train_idx = json.loads(row['train_indices']) if isinstance(row['train_indices'], str) else row['train_indices']
-                        test_idx = json.loads(row['test_indices']) if isinstance(row['test_indices'], str) else row['test_indices']
-                        all_indices.update(train_idx)
-                        all_indices.update(test_idx)
-                    num_trials = len(all_indices)
-                except (json.JSONDecodeError, KeyError, AttributeError) as e:
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"Failed to calculate num_trials from fold indices: {e}")
-        
-        # Final fallback: use default
-        if num_trials is None:
-            num_trials = 80
+        if not os.path.exists(metadata_path):
             logger = logging.getLogger(__name__)
-            logger.warning(f"Using default num_trials=80 for BIC calculation (could not determine from metadata or fold indices)")
+            logger.warning(f"Metadata file not found at {metadata_path}. Cannot compute BIC without num_trials.")
+            return None
+        
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+                num_trials = metadata.get('num_trials')
+                
+                if num_trials is None:
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Metadata file missing 'num_trials' key. Cannot compute BIC.")
+                    return None
+                
+                # Validate that num_trials is a positive integer
+                if not isinstance(num_trials, (int, float)) or num_trials <= 0:
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Invalid num_trials value in metadata: {num_trials}. Must be a positive number.")
+                    return None
+                
+                num_trials = int(num_trials)
+        except (json.JSONDecodeError, IOError, OSError, ValueError) as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to read num_trials from metadata at {metadata_path}: {e}")
+            return None
         
         aic = 2 * k_params - 2 * mean_test_ll
-        bic = k_params * np.log(max(1, num_trials)) - 2 * mean_test_ll
+        bic = k_params * np.log(num_trials) - 2 * mean_test_ll
         
         return {
             'generator': generator,
@@ -303,7 +291,6 @@ def run_model_recovery(
             }
             per_run_stats.append(entry)
             
-            # Write brief summary to model bar after completion
             model_bar.write(
                 f"    ✓ {model_name} on {ref['gen']}-run{ref['run_idx']}: "
                 f"LL={summary['mean_test_ll']:.2f}, AIC={summary['aic']:.1f}, "

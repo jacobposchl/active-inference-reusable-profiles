@@ -1,4 +1,5 @@
-"""Helpers for recovery-style experiments.
+"""
+Helpers for recovery-style experiments.
 
 - building A/B/D matrices
 - generating reference runs
@@ -22,10 +23,8 @@ from src.utils.ll_eval import (
     compute_sequence_ll_for_model_worker,
     _eval_m1_gamma,
     _eval_m2_params,
-    _eval_m3_params,
     _eval_m1_gamma_masked,
     _eval_m2_params_masked,
-    _eval_m3_params_masked,
     _eval_m3_params_per_profile,
     _eval_m3_params_per_profile_masked,
     evaluate_ll_with_valuefn_masked,
@@ -125,25 +124,23 @@ def _write_dict_csv(path, fieldnames, rows, mode='w'):
 
 
 def build_abd():
-    """Build and return (A, B, D) using config constants.
+    """
+    Build and return (A, B, D) using config constants.
     
-    Now uses 3 state factors:
+    uses 3 state factors:
     - context (volatile/stable)
     - better_arm (left_better/right_better) 
     - choice (start/hint/left/right)
     
-    And 3 observation modalities:
+    3 observation modalities:
     - hints (reveal which arm is better)
     - rewards (outcome of arm choice, context-dependent probabilities)
     - choices (observe own action)
     
-    Context is a HIDDEN state - agent infers it from reward patterns.
+    Context is a hidden state, the agent infers it from reward patterns.
     Different reward probabilities (volatile: 70%, stable: 90%) enable
     context inference, allowing M3 profile mixing based on inferred context.
     """
-    # Context-specific reward probabilities for better arm
-    # Volatile context: 0.70, Stable context: 0.90
-    # This enables context inference from reward patterns
     from config.experiment_config import VOLATILE_REWARD_BETTER, STABLE_REWARD_BETTER
     p_reward = [VOLATILE_REWARD_BETTER, STABLE_REWARD_BETTER]
     
@@ -160,7 +157,8 @@ def build_abd():
 
 
 def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal_interval=None):
-    """Generate reference rollouts for a set of generators.
+    """
+    Generate reference rollouts for a set of generators.
 
     Returns (A, B, D, refs) where refs is a list of dicts
     {'gen', 'run_idx', 'seed', 'ref_logs'}.
@@ -237,289 +235,6 @@ def _make_temp_agent_and_policies(A, B, D):
     return policies, num_actions_per_factor
 
 
-def fit_model_on_runs(model_name, A, B, D, ref_logs_list, save_grid=False, save_dir=None):
-    """Fit model via small grid search on provided reference logs (list).
-
-    Returns best_params (dict).
-    """
-    best_ll = -np.inf
-    best_params = None
-    # Number of worker processes for parallel sections (can be set via env)
-    max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-    if model_name == 'M1':
-        # Two-stage search for M1: coarse grid then local refinement.
-        # Parallelize evaluations across CPU cores using worker helpers.
-        coarse_g = [0.5, 1.0, 1.5, 2.5, 4.0, 8.0, 12.0, 16.0]
-        max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-
-        # Submit (g, ref) jobs to workers which use A/B/D from initializer.
-        coarse_scores = {g: 0.0 for g in coarse_g}
-        coarse_evals = []
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
-            future_map = {}
-            for g in coarse_g:
-                for ref in ref_logs_list:
-                    fut = exe.submit(_eval_m1_gamma, None, None, None, g, ref)
-                    future_map[fut] = g
-            for fut in concurrent.futures.as_completed(future_map):
-                g = future_map[fut]
-                try:
-                    val = fut.result()
-                except Exception:
-                    val = -np.inf
-                coarse_scores[g] += float(val)
-                coarse_evals.append((g, float(val)))
-
-        # Determine best coarse gamma
-        best_g = max(coarse_scores, key=coarse_scores.get)
-        best_ll = coarse_scores[best_g]
-        best_params = {'gamma': best_g}
-
-        # Local refinement around best coarse point (run sequentially, small grid)
-        best_idx = int(coarse_g.index(best_g))
-        lo_idx = max(0, best_idx - 1)
-        hi_idx = min(len(coarse_g) - 1, best_idx + 1)
-        lo = coarse_g[lo_idx]
-        hi = coarse_g[hi_idx]
-        if best_idx == 0:
-            lo = max(0.1, coarse_g[0] * 0.5)
-        if best_idx == len(coarse_g) - 1:
-            hi = coarse_g[-1] * 1.25
-
-        fine_g = np.linspace(lo, hi, 7)
-        fine_evals = []
-        # Parallelize fine-grid evaluation using worker helpers to reuse A/B/D in workers
-        max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
-            fut_map = {}
-            for g in fine_g:
-                for ref in ref_logs_list:
-                    fut = exe.submit(_eval_m1_gamma, None, None, None, float(g), ref)
-                    fut_map[fut] = float(g)
-            # accumulate totals per gamma
-            fine_totals = {float(g): 0.0 for g in fine_g}
-            for fut in concurrent.futures.as_completed(fut_map):
-                g = fut_map[fut]
-                try:
-                    val = fut.result()
-                except Exception:
-                    val = -np.inf
-                fine_totals[g] += float(val)
-        for g, total in fine_totals.items():
-            fine_evals.append((float(g), float(total)))
-            if total > best_ll:
-                best_ll = total
-                best_params = {'gamma': float(g)}
-        # optionally save grid evaluations
-        if save_grid:
-            if save_dir is None:
-                save_dir = os.path.join('results', 'csv')
-            os.makedirs(save_dir, exist_ok=True)
-            import csv
-            path_coarse = os.path.join(save_dir, 'grid_m1_coarse.csv')
-            with open(path_coarse, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['gamma', 'aggregate_ll'])
-                for gg, vv in coarse_scores.items():
-                    w.writerow([gg, vv])
-            path_fine = os.path.join(save_dir, 'grid_m1_fine.csv')
-            with open(path_fine, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['gamma', 'total_ll'])
-                for gg, vv in fine_evals:
-                    w.writerow([gg, vv])
-
-    elif model_name == 'M2':
-        # Two-stage search for M2: coarse grid then local refinement
-        coarse_g_base = [0.5, 1.0, 1.5, 2.5, 4.0, 8.0]
-        coarse_k = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0]
-        coarse_scores = np.zeros((len(coarse_g_base), len(coarse_k)))
-        coarse_evals = []
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
-            future_map = {}
-            for i, g_base in enumerate(coarse_g_base):
-                for j, k in enumerate(coarse_k):
-                    for ref in ref_logs_list:
-                        fut = exe.submit(_eval_m2_params, None, None, None, g_base, k, ref)
-                        future_map[fut] = (i, j)
-            for fut in concurrent.futures.as_completed(future_map):
-                i, j = future_map[fut]
-                try:
-                    val = fut.result()
-                except Exception:
-                    val = -np.inf
-                coarse_scores[i, j] += float(val)
-                coarse_evals.append((i, j, float(val)))
-
-        # Find best coarse indices and define local refinement bounds
-        best_flat = np.argmax(coarse_scores)
-        bi, bj = np.unravel_index(best_flat, coarse_scores.shape)
-        # bounds for g_base
-        gi_lo = max(0, bi - 1)
-        gi_hi = min(len(coarse_g_base) - 1, bi + 1)
-        gb_lo = coarse_g_base[gi_lo]
-        gb_hi = coarse_g_base[gi_hi]
-        if bi == 0:
-            gb_lo = max(0.1, coarse_g_base[0] * 0.5)
-        if bi == len(coarse_g_base) - 1:
-            gb_hi = coarse_g_base[-1] * 1.25
-
-        # bounds for k
-        kj_lo = max(0, bj - 1)
-        kj_hi = min(len(coarse_k) - 1, bj + 1)
-        k_lo = coarse_k[kj_lo]
-        k_hi = coarse_k[kj_hi]
-        if bj == 0:
-            k_lo = max(1e-3, coarse_k[0] * 0.5)
-        if bj == len(coarse_k) - 1:
-            k_hi = coarse_k[-1] * 1.5
-
-        fine_gb = np.linspace(gb_lo, gb_hi, 6)
-        fine_k = np.linspace(k_lo, k_hi, 6)
-        fine_evals = []
-        # Parallelize fine M2 grid using worker helpers
-        max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
-            fut_map = {}
-            for g_base in fine_gb:
-                for k in fine_k:
-                    for ref in ref_logs_list:
-                        fut = exe.submit(_eval_m2_params, None, None, None, float(g_base), float(k), ref)
-                        fut_map[fut] = (float(g_base), float(k))
-            # accumulate totals
-            fine_totals = {(float(g), float(k)): 0.0 for g in fine_gb for k in fine_k}
-            for fut in concurrent.futures.as_completed(fut_map):
-                g_base, k_val = fut_map[fut]
-                try:
-                    val = fut.result()
-                except Exception:
-                    val = -np.inf
-                fine_totals[(g_base, k_val)] += float(val)
-        for (gb, kk), total in fine_totals.items():
-            fine_evals.append((float(gb), float(kk), float(total)))
-            if total > best_ll:
-                best_ll = total
-                best_params = {'gamma_base': float(gb), 'entropy_k': float(kk)}
-        if save_grid:
-            if save_dir is None:
-                save_dir = os.path.join('results', 'csv')
-            os.makedirs(save_dir, exist_ok=True)
-            import csv
-            path_coarse = os.path.join(save_dir, 'grid_m2_coarse.csv')
-            with open(path_coarse, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['g_base_idx', 'k_idx', 'aggregate_ll'])
-                for i, j, v in coarse_evals:
-                    w.writerow([i, j, v])
-            path_fine = os.path.join(save_dir, 'grid_m2_fine.csv')
-            with open(path_fine, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['g_base', 'k', 'total_ll'])
-                for gb, kk, vv in fine_evals:
-                    w.writerow([gb, kk, vv])
-
-    elif model_name == 'M3':
-        # SMART CONSTRAINED SEARCH: Exploit M3's symmetric profile structure
-        # Assumption: Xi scales are symmetric (same magnitude, opposite signs for arms)
-        # Allows: Independent gamma per profile (no assumption of equal precision)
-        # This reduces search space from 6,561 to 108 candidates.
-        policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
-
-        # Grid definitions
-        gamma_vals = [1.0, 2.5, 5.0]  # Each profile can have different gamma
-        xi_scale_hint = [0.5, 1.0, 2.0, 4.0]  # Hint scale (symmetric across profiles)
-        xi_scale_arm = [0.5, 1.0, 2.0]  # Arm bias magnitude (symmetric)
-        
-        from itertools import product
-        num_profiles = len(M3_DEFAULTS['profiles'])
-
-        # Build constrained candidates with symmetric xi but independent gammas
-        candidates = []
-        for gamma_p0 in gamma_vals:
-            for gamma_p1 in gamma_vals:
-                for hint_scale in xi_scale_hint:
-                    for arm_scale in xi_scale_arm:
-                        # Allow different gamma per profile
-                        gammas = [gamma_p0, gamma_p1]
-                        
-                        # Symmetric xi scaling across profiles
-                        xi_scales = [
-                            [hint_scale, arm_scale, arm_scale],  # Profile 0
-                            [hint_scale, arm_scale, arm_scale]   # Profile 1
-                        ]
-                        candidates.append((gammas, xi_scales))
-
-        # Evaluate each candidate across all training refs in parallel
-        max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-        candidate_scores = [0.0] * len(candidates)
-        candidate_evals = []
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)) as exe:
-            future_map = {}
-            for c_idx, (gammas_c, xi_scales_c) in enumerate(candidates):
-                for ref in ref_logs_list:
-                    fut = exe.submit(_eval_m3_params_per_profile, None, None, None, gammas_c, xi_scales_c, ref)
-                    future_map[fut] = c_idx
-            for fut in concurrent.futures.as_completed(future_map):
-                c_idx = future_map[fut]
-                try:
-                    val = fut.result()
-                except Exception:
-                    val = -np.inf
-                candidate_scores[c_idx] += float(val)
-                candidate_evals.append((c_idx, float(val)))
-
-        # pick best candidate
-        best_idx = int(np.nanargmax(candidate_scores))
-        best_ll = candidate_scores[best_idx]
-        best_gammas, best_xi_scales = candidates[best_idx]
-        best_params = {'gamma_profile': best_gammas, 'xi_scales_profile': best_xi_scales}
-        if save_grid:
-            if save_dir is None:
-                save_dir = os.path.join('results', 'csv')
-            os.makedirs(save_dir, exist_ok=True)
-            import csv
-            path_candidates = os.path.join(save_dir, 'grid_m3_candidates.csv')
-            with open(path_candidates, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['candidate_idx', 'gamma_profile', 'xi_scales_profile', 'score'])
-                for idx, score in enumerate(candidate_scores):
-                    gam, xi = candidates[idx]
-                    w.writerow([idx, str(gam), str(xi), score])
-
-    # Save metadata about this fit call if requested
-    try:
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            meta = {
-                'model_name': model_name,
-                'n_refs': len(ref_logs_list),
-                'save_grid': bool(save_grid),
-                'timestamp': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
-                'coarse_grid_counts': {
-                    'M1_coarse': len(coarse_g) if model_name == 'M1' else None,
-                    'M2_coarse': (len(coarse_g_base), len(coarse_k)) if model_name == 'M2' else None,
-                    'M3_candidates': len(candidates) if model_name == 'M3' else None
-                },
-                'python_version': __import__('platform').python_version()
-            }
-            # attempt to add pymdp version
-            try:
-                import pymdp
-                meta['pymdp_version'] = getattr(pymdp, '__version__', None)
-            except Exception:
-                meta['pymdp_version'] = None
-
-            meta_path = os.path.join(save_dir, f'metadata_fit_{model_name}.json')
-            with open(meta_path, 'w') as mf:
-                json.dump(meta, mf, indent=2)
-    except Exception:
-        # do not fail fitting if metadata save fails
-        pass
-
-    return best_params
-
-
-
 
 def cv_fit_single_run(
     model_name,
@@ -535,7 +250,17 @@ def cv_fit_single_run(
     save_artifacts=True,
     record_grid=False,
 ):
-    """Perform within-run K-fold CV for a single reference run with rich logging."""
+    """
+    Perform within-run K-fold CV for a single reference run
+    
+    Parameters
+    ----------
+    model_name : str
+        Name of the model to fit
+    A, B, D : arrays
+        Generative model matrices
+    ref_logs : dict
+    """
     N = len(ref_logs['action'])
     idx = np.arange(N)
     folds = np.array_split(idx, K)
@@ -545,7 +270,6 @@ def cv_fit_single_run(
     total_grid_evals = 0
     run_start = time.time()
     
-    # Import tqdm for fold progress (optional, graceful fallback)
     try:
         from tqdm import tqdm as _tqdm
         use_progress = True
@@ -561,7 +285,6 @@ def cv_fit_single_run(
         test_idx_set = set(test_idx)
         train_idx = [int(i) for i in idx if int(i) not in test_idx_set]
         
-        # Special case: K=1 means no cross-validation, use all data for both train and test
         if K == 1 or len(train_idx) == 0:
             train_idx = list(range(N))
         best_ll = -np.inf
@@ -745,10 +468,9 @@ def cv_fit_single_run(
 
         elif model_name == 'M3':
             policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
-            # SMART CONSTRAINED SEARCH (same as non-CV version)
             gamma_vals = [1.0, 2.5, 5.0]
-            xi_scale_hint = [0.5, 1.0, 2.0, 4.0]  # Expanded to include 4.0
-            xi_scale_arm = [0.5, 1.0, 2.0]  # Removed 4.0
+            xi_scale_hint = [0.5, 1.0, 2.0, 4.0] 
+            xi_scale_arm = [0.5, 1.0, 2.0] 
             
             from itertools import product
             num_profiles = len(M3_DEFAULTS['profiles'])
@@ -1056,7 +778,8 @@ def cv_fit_single_run(
 
 
 def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
-    """Run teacher-forced predictions for a model and return per-trial records.
+    """
+    Run teacher-forced predictions for a model and return per-trial records.
 
     Returns list of dict rows with per-trial fields used for CSV export.
     """
@@ -1073,8 +796,6 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
 
     reversals = set(find_reversals(ref_logs['context']))
 
-    # initial observation
-    # 3 observations: hint, reward, choice (context is hidden)
     initial_obs_labels = ['null', 'null', 'observe_start']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
 
@@ -1101,7 +822,6 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
             a_idx = int(policy[0, 2])  # Choice action at index 2
             action_probs[a_idx] += float(q_pi[pi_idx])
 
-        # Normalize (should already sum to 1)
         if action_probs.sum() > 0:
             action_probs = action_probs / action_probs.sum()
 
@@ -1120,7 +840,6 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         # log-likelihood for this trial (log prob assigned to the taken action)
         ll_t = np.log(gen_action_prob + 1e-16)
 
-        # Get true context (always needed for logging)
         true_context = ref_logs['context'][t]
         
         # accuracy: whether predicted action chooses the currently better arm
@@ -1128,7 +847,7 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         current_better_arm = ref_logs.get('current_better_arm', [None]*T)[t]
         
         if current_better_arm is not None:
-            # New volatile/stable task: check against current_better_arm
+            # Check against current_better_arm for volatile/stable contexts
             if current_better_arm == 'left':
                 acc = 1 if ('left' in pred_action) else 0
             elif current_better_arm == 'right':
@@ -1136,13 +855,8 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
             else:
                 acc = 0
         else:
-            # Fallback for old left_better/right_better task
-            if true_context == 'left_better':
-                acc = 1 if ('left' in pred_action) else 0
-            elif true_context == 'right_better':
-                acc = 1 if ('right' in pred_action) else 0
-            else:
-                acc = 0
+            # No current_better_arm info available - cannot compute accuracy
+            acc = 0
 
         # flags
         is_reversal = int(t in reversals)
@@ -1171,15 +885,12 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
 
         rows.append(row)
 
-        # CRITICAL: Set the agent's action so beliefs propagate correctly through B
-        # We use the GENERATOR's actual action (teacher forcing)
+
         if gen_a_idx is not None:
             # Create action array for all factors: [context_action, better_arm_action, choice_action]
-            # Only choice (index 2) is controllable, others are 'rest' (index 0)
             runner.agent.action = np.array([0, 0, gen_a_idx])
 
         # advance obs to next trial using generator's recorded obs
-        # Context is now hidden - no direct observation
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
             next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
         else:
@@ -1260,19 +971,16 @@ def evaluate_on_test(model_name, A, B, D, params, ref_logs_list):
     else:
         policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
         profiles = []
-        # Backward-compatible: support old params format with single 'gamma' and 'xi_scale'
         if params is None:
             params = {}
 
         if 'gamma' in params and 'xi_scale' in params:
-            # legacy format: apply same gamma and xi_scale to all profiles
             for p in M3_DEFAULTS['profiles']:
                 prof = dict(p)
                 prof['gamma'] = params['gamma']
                 prof['xi_logits'] = (np.array(p['xi_logits'], float) * params['xi_scale']).tolist()
                 profiles.append(prof)
         elif 'gamma_profile' in params and 'xi_scales_profile' in params:
-            # new format: per-profile gammas and per-profile xi triple scales
             gamma_profile = params['gamma_profile']
             xi_scales_profile = params['xi_scales_profile']
             for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
@@ -1287,7 +995,6 @@ def evaluate_on_test(model_name, A, B, D, params, ref_logs_list):
                 prof['xi_logits'] = new_xi.tolist()
                 profiles.append(prof)
         else:
-            # fallback: use defaults
             for p in M3_DEFAULTS['profiles']:
                 profiles.append(dict(p))
 

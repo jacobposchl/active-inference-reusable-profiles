@@ -1,15 +1,13 @@
 import numpy as np
-import os
-import concurrent.futures
 from src.models import build_A, build_B, build_D, make_value_fn
 from src.utils.model_utils import create_model
 from config.experiment_config import *
 
-
 def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
-    """Compute per-trial log-probabilities of the actions in `ref_logs`
-    under `model_name` using teacher-forcing (condition on the same
-    observed history). Returns a list of per-trial log-likelihoods.
+    """
+    Compute per-trial log-probabilities of the actions in ref_logs under model_name using teacher-forcing (condition on the same observed history). 
+    
+    Returns a list of per-trial log-likelihoods.
     """
     value_fn = create_model(model_name, A, B, D)
     from src.models import AgentRunner
@@ -18,7 +16,7 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)
 
-    # 3 observations: hint, reward, choice (context is hidden)
+    # 3 observations: hint, reward, choice
     initial_obs_labels = ['null', 'null', 'observe_start']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
 
@@ -29,7 +27,6 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
         ll_t = runner.action_logprob(obs_ids, action_label, t)
         ll_seq.append(ll_t)
 
-        # Context is now hidden - no direct observation
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
             next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
         else:
@@ -39,8 +36,6 @@ def compute_sequence_ll_for_model(model_name, A, B, D, ref_logs):
 
     return ll_seq
 
-
-
 def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
     """Compute total log-likelihood of ref_logs under a model defined by value_fn."""
     from src.models import AgentRunner
@@ -49,7 +44,7 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
                                OBSERVATION_CHOICES, ACTION_CHOICES,
                                reward_mod_idx=1)
 
-    # 3 observations: hint, reward, choice (context is hidden)
+    # 3 observations: hint, reward, choice
     initial_obs_labels = ['null', 'null', 'observe_start']
     obs_ids = runner.obs_labels_to_ids(initial_obs_labels)
     T = len(ref_logs['action'])
@@ -58,7 +53,6 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
         a = ref_logs['action'][t]
         ll_t = runner.action_logprob(obs_ids, a, t)
         ll_seq.append(ll_t)
-        # Context is now hidden - no direct observation
         if 'hint_label' in ref_logs and ref_logs['hint_label']:
             next_obs = [ref_logs['hint_label'][t], ref_logs['reward_label'][t], ref_logs['choice_label'][t]]
         else:
@@ -69,12 +63,13 @@ def evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs):
 
 
 def evaluate_ll_with_valuefn_masked(value_fn, A, B, D, ref_logs, mask_indices):
-    """Compute masked total log-likelihood over a subset of trials.
-
+    """
+    Compute masked total log-likelihood over a subset of trials.
+    
     Runs the model forward over the full trial sequence (so internal
     agent state updates match the original run), returns the full per-trial
-    log-likelihood sequence and the sum over `mask_indices`.
-
+    log-likelihood sequence and the sum over mask_indices.
+    
     Parameters:
     -----------
     value_fn : callable
@@ -143,6 +138,22 @@ def compute_sequence_ll_for_model_worker(model_name, ref_logs):
 
 
 def _eval_m1_gamma(A, B, D, g_val, ref_logs):
+    """Worker helper: evaluate M1 model with a specific gamma parameter.
+    
+    Parameters
+    ----------
+    A, B, D : arrays or None
+        Generative model matrices. If None, uses global worker variables.
+    g_val : float
+        Policy precision (gamma) value to evaluate
+    ref_logs : dict
+        Reference run logs with 'action', 'reward_label', 'hint_label', 'choice_label'
+        
+    Returns
+    -------
+    total_ll : float
+        Total log-likelihood of ref_logs under M1 with specified gamma
+    """
     if A is None:
         try:
             A_loc = A_GLOB
@@ -175,6 +186,29 @@ def _eval_m1_gamma_masked(A, B, D, g_val, ref_logs, mask_indices):
 
 
 def _eval_m2_params(A, B, D, g_base, k, ref_logs):
+    """Worker helper: evaluate M2 model with specific gamma_base and entropy_k parameters.
+    
+    Parameters
+    ----------
+    A, B, D : arrays or None
+        Generative model matrices. If None, uses global worker variables.
+    g_base : float
+        Base policy precision parameter for gamma_schedule
+    k : float
+        Entropy coupling parameter for gamma_schedule (higher k = more sensitivity to uncertainty)
+    ref_logs : dict
+        Reference run logs with 'action', 'reward_label', 'hint_label', 'choice_label'
+        
+    Returns
+    -------
+    total_ll : float
+        Total log-likelihood of ref_logs under M2 with specified parameters
+        
+    Notes
+    -----
+    M2's gamma_schedule adapts precision to uncertainty: gamma = g_base / (1 + k * H_better_arm)
+    where H_better_arm is the entropy of beliefs about which arm is better.
+    """
     if A is None:
         try:
             A_loc = A_GLOB
@@ -209,64 +243,6 @@ def _eval_m2_params_masked(A, B, D, g_base, k, ref_logs, mask_indices):
         return g_base / (1.0 + k * H_better_arm)
 
     value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
-    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
-    return total_ll
-
-
-def _eval_m3_params(A, B, D, g_val, xi_scale, ref_logs):
-    if A is None:
-        try:
-            policies = M3_POLICIES_GLOB
-            num_actions_per_factor = NUM_ACTIONS_PER_FACTOR_GLOB
-            A_loc = A_GLOB
-            B_loc = B_GLOB
-            D_loc = D_GLOB
-        except NameError:
-            policies = None
-            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-            A_loc, B_loc, D_loc = A, B, D
-    else:
-        policies = None
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-        A_loc, B_loc, D_loc = A, B, D
-
-    profiles = []
-    for p in M3_DEFAULTS['profiles']:
-        prof = dict(p)
-        prof['gamma'] = g_val
-        prof['xi_logits'] = (np.array(p['xi_logits'], float) * xi_scale).tolist()
-        profiles.append(prof)
-
-    value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
-    total_ll, _ = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
-    return total_ll
-
-
-def _eval_m3_params_masked(A, B, D, g_val, xi_scale, ref_logs, mask_indices):
-    if A is None:
-        try:
-            policies = M3_POLICIES_GLOB
-            num_actions_per_factor = NUM_ACTIONS_PER_FACTOR_GLOB
-            A_loc = A_GLOB
-            B_loc = B_GLOB
-            D_loc = D_GLOB
-        except NameError:
-            policies = None
-            num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-            A_loc, B_loc, D_loc = A, B, D
-    else:
-        policies = None
-        num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_CHOICES)]
-        A_loc, B_loc, D_loc = A, B, D
-
-    profiles = []
-    for p in M3_DEFAULTS['profiles']:
-        prof = dict(p)
-        prof['gamma'] = g_val
-        prof['xi_logits'] = (np.array(p['xi_logits'], float) * xi_scale).tolist()
-        profiles.append(prof)
-
-    value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
     total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
     return total_ll
 
