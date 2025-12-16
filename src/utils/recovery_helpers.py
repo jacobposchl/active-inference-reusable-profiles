@@ -12,6 +12,8 @@ import os
 import logging
 import json
 import time
+import hashlib
+import random
 import concurrent.futures
 from collections import Counter
 import numpy as np
@@ -168,7 +170,15 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
     refs = []
     for gen in generators:
         for r in range(runs_per_generator):
-            run_seed = int(seed + r + (abs(hash(gen)) % 1000))
+            # Create unique, deterministic seed for this run
+            # SHA256 hash ensures stable, platform-independent seeding
+            gen_hash = int(hashlib.sha256(gen.encode('utf-8')).hexdigest()[:8], 16) % 1000
+            run_seed = int(seed + r + gen_hash)
+            
+            # Reseed all RNGs for this run to ensure full reproducibility
+            np.random.seed(run_seed)
+            random.seed(run_seed)
+            
             if reversal_interval is not None:
                 reversal_schedule = [i for i in range(reversal_interval, num_trials, reversal_interval)]
             else:
@@ -869,6 +879,7 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         row = {
             't': t,
             'true_context': true_context,
+            'current_better_arm': current_better_arm,
             'gen_action': gen_action,
             'hint_label': ref_logs.get('hint_label', ['null']*T)[t],
             'reward_label': ref_logs.get('reward_label', ['null']*T)[t],
@@ -916,6 +927,7 @@ def save_trial_level_csv(rows, out_path):
         'fold',
         'role',
         'true_context',
+        'current_better_arm',
         'gen_action',
         'hint_label',
         'reward_label',
@@ -941,6 +953,7 @@ def save_trial_level_csv(rows, out_path):
                 r.get('fold', ''),
                 r.get('role', ''),
                 r['true_context'],
+                r.get('current_better_arm', ''),
                 r['gen_action'],
                 r['hint_label'],
                 r['reward_label'],

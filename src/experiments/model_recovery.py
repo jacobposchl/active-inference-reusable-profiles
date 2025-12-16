@@ -13,6 +13,7 @@ The script coordinates four stages:
 import argparse
 import os
 import logging
+import random
 import shutil
 import json
 import numpy as np
@@ -292,7 +293,7 @@ def run_model_recovery(
             per_run_stats.append(entry)
             
             model_bar.write(
-                f"    ✓ {model_name} on {ref['gen']}-run{ref['run_idx']}: "
+                f"    [OK] {model_name} on {ref['gen']}-run{ref['run_idx']}: "
                 f"LL={summary['mean_test_ll']:.2f}, AIC={summary['aic']:.1f}, "
                 f"time={fit_duration:.1f}s"
             )
@@ -402,6 +403,7 @@ if __name__ == '__main__':
     args = _parse_args()
     
     # Set random seed for reproducibility
+    random.seed(args.seed)
     np.random.seed(args.seed)
     
     # Configure worker processes to use most CPU cores for parallel grid search
@@ -427,7 +429,7 @@ if __name__ == '__main__':
     )
     
     # Print summary
-    print(f"\n✓ Model recovery complete!")
+    print(f"\n[OK] Model recovery complete!")
     print(f"  Total entries: {len(stats)}")
     print(f"  Results location: {artifact_dir}/")
     print(f"    - per_run_metrics.csv")
