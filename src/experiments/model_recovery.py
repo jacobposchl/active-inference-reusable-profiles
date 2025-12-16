@@ -381,16 +381,16 @@ def _parse_args():
         action='store_true',
         help="Resume from existing results, skipping already completed generator+model+run combinations.",
     )
+    parser.add_argument(
+        "--reserve-cores",
+        type=int,
+        default=10,
+        help="Number of CPU cores to reserve for system (remaining cores used for parallel grid search).",
+    )
     return parser.parse_args()
 
 
 if __name__ == '__main__':
-    # Configure worker processes to use most CPU cores for parallel grid search
-    _cpu_total = os.cpu_count() or 1
-    _sub_cpu = max(1, _cpu_total - 10)  # Leave 10 cores for system
-    os.environ['MODEL_COMP_MAX_WORKERS'] = str(_sub_cpu)
-    print(f"[model_recovery] Using {_sub_cpu} worker processes (out of {_cpu_total} total)")
-
     # Set up logging
     logging.basicConfig(
         level=logging.INFO,
@@ -400,6 +400,15 @@ if __name__ == '__main__':
     
     # Parse command-line arguments
     args = _parse_args()
+    
+    # Set random seed for reproducibility
+    np.random.seed(args.seed)
+    
+    # Configure worker processes to use most CPU cores for parallel grid search
+    _cpu_total = os.cpu_count() or 1
+    _sub_cpu = max(1, _cpu_total - args.reserve_cores)
+    os.environ['MODEL_COMP_MAX_WORKERS'] = str(_sub_cpu)
+    print(f"[model_recovery] Using {_sub_cpu} worker processes (out of {_cpu_total} total, {args.reserve_cores} reserved)")
     gens = tuple(g.strip() for g in args.generators.split(",") if g.strip())
     reversal_interval = args.reversal_interval if args.reversal_interval > 0 else None
     

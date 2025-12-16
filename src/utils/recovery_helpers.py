@@ -478,14 +478,16 @@ def cv_fit_single_run(
             candidates = []
             for gamma_p0 in gamma_vals:
                 for gamma_p1 in gamma_vals:
-                    for hint_scale in xi_scale_hint:
-                        for arm_scale in xi_scale_arm:
-                            gammas = [gamma_p0, gamma_p1]
-                            xi_scales = [
-                                [hint_scale, arm_scale, arm_scale],
-                                [hint_scale, arm_scale, arm_scale]
-                            ]
-                            candidates.append((list(gammas), xi_scales))
+                    for hint_scale_p0 in xi_scale_hint:
+                        for hint_scale_p1 in xi_scale_hint:
+                            for arm_scale_p0 in xi_scale_arm:
+                                for arm_scale_p1 in xi_scale_arm:
+                                    gammas = [gamma_p0, gamma_p1]
+                                    xi_scales = [
+                                        [hint_scale_p0, arm_scale_p0, arm_scale_p0],
+                                        [hint_scale_p1, arm_scale_p1, arm_scale_p1]
+                                    ]
+                                    candidates.append((list(gammas), xi_scales))
 
             # Parallelize M3 grid evaluation across workers
             max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))

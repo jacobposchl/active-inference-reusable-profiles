@@ -53,9 +53,19 @@ Launch the cross-validated recovery study
 ```bash
 python src/experiments/model_recovery.py \
   --generators M1,M2,M3,egreedy,softmax \
-  --seed 1 \
-  --folds 5
+  --seed 42 \
+  --folds 5 \
+  --reserve-cores 10
 ```
+
+**Common arguments:**
+- `--generators`: Comma-separated list of behavioral generators (default: `M1,M2,M3,egreedy,softmax`)
+- `--seed`: Random seed for reproducibility (default: `42`)
+- `--folds`: Number of cross-validation folds (default: `5`)
+- `--runs-per-generator`: Number of runs per generator (default: `5`)
+- `--num-trials`: Number of trials per run (default: `400`)
+- `--reserve-cores`: Number of CPU cores to reserve for system (default: `10`)
+- `--resume`: Resume from existing results, skipping completed combinations
 
 ### Output Layout
 
