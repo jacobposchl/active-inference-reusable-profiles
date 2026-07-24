@@ -50,3 +50,6 @@ results/
 # Behavioral data
 behavioral_data/raw_data/
 behavioral_data/derivatives/
+
+CLAUDE.md
+*.pdf
