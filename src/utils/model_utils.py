@@ -79,7 +79,9 @@ def compute_metrics(logs):
     """Compute performance metrics from episode logs."""
     # Accuracy
     from src.utils.helpers import trial_accuracy
-    acc = trial_accuracy(logs['action'], logs['context'])
+    # accuracy = chose the currently better arm; pass the better-arm series,
+    # not the volatility context (which carries no arm information).
+    acc = trial_accuracy(logs['action'], logs.get('current_better_arm', logs['context']))
     
     # Reversals
     from src.utils.helpers import find_reversals

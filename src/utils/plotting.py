@@ -463,7 +463,7 @@ def plot_accuracy_around_reversals(results_by_model, pre=10, post=20, outpath=No
     plt.figure(figsize=(8, 5))
     colors = {'M1': 'blue', 'M2': 'green', 'M3': 'red'}
     for model_name, logs_list in results_by_model.items():
-        acc_series = [trial_accuracy(logs['action'], logs['context']) for logs in logs_list]
+        acc_series = [trial_accuracy(logs['action'], logs.get('current_better_arm', logs['context'])) for logs in logs_list]
         revs = find_reversals(logs_list[0]['context'])
         pooled = align_windows(acc_series, revs, pre=pre, post=post)
         mean, lo, hi = compute_mean_and_ci(pooled, bootstrap_func)

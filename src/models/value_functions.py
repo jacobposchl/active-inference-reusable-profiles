@@ -14,6 +14,7 @@ Model adaptation mechanisms:
 import numpy as np
 from pymdp.maths import softmax
 from src.utils.helpers import compute_entropy
+from config.experiment_config import M2_DEFAULTS
 
 
 def make_values_M1(C_reward_logits=None, gamma=1.0, E_logits=None):
@@ -81,11 +82,14 @@ def make_values_M2(C_reward_logits=None, gamma_schedule=None, E_logits=None):
     """
 
     if gamma_schedule is None:
-        # Default: precision inversely related to entropy of better_arm beliefs
-        def gamma_schedule(H_better_arm, t, g_base=1.5, k=1.0):
+        # Default schedule reads the configured M2 parameters (single source of
+        # truth), so a bare make_value_fn('M2') matches the experiment config
+        # instead of silently using different hardcoded values.
+        def gamma_schedule(H_better_arm, t,
+                           g_base=M2_DEFAULTS['gamma_base'], k=M2_DEFAULTS['entropy_k']):
             """
             Lower precision when uncertain (higher entropy).
-            
+
             gamma = g_base / (1 + k * H)
             """
             return g_base / (1.0 + k * H_better_arm)

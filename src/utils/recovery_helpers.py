@@ -170,10 +170,13 @@ def generate_all_runs(generators, runs_per_generator, num_trials, seed, reversal
     refs = []
     for gen in generators:
         for r in range(runs_per_generator):
-            # Create unique, deterministic seed for this run
-            # SHA256 hash ensures stable, platform-independent seeding
-            gen_hash = int(hashlib.sha256(gen.encode('utf-8')).hexdigest()[:8], 16) % 1000
-            run_seed = int(seed + r + gen_hash)
+            # Unique, deterministic seed from the joint (seed, generator, run)
+            # triple. The previous additive form (seed + r + gen_hash) could
+            # collide across different (generator, run) pairs, correlating runs
+            # meant to be independent samples. SHA256 keeps it stable and
+            # platform-independent.
+            seed_key = f"{seed}|{gen}|{r}".encode('utf-8')
+            run_seed = int(hashlib.sha256(seed_key).hexdigest()[:8], 16)
             
             # Reseed all RNGs for this run to ensure full reproducibility
             np.random.seed(run_seed)
@@ -538,9 +541,18 @@ def cv_fit_single_run(
                             }
                         )
                     
-                    if tr_ll > best_ll:
-                        best_ll = tr_ll
-                        best_params = {'gamma_profile': list(gammas_c), 'xi_scales_profile': xi_scales_c}
+            # Deterministic winner: argmax over all fully-collected candidate
+            # scores with a stable (sorted-key) tie-break, so the result does not
+            # depend on the worker completion order that as_completed yields.
+            if candidate_scores:
+                best_key = max(sorted(candidate_scores.keys()),
+                               key=lambda kk: candidate_scores[kk])
+                best_ll = candidate_scores[best_key]
+                gammas_c, xi_scales_c = best_key
+                best_params = {
+                    'gamma_profile': list(gammas_c),
+                    'xi_scales_profile': [list(x) for x in xi_scales_c],
+                }
 
         else:
             raise ValueError(f"Unknown model for CV: {model_name}")
@@ -635,8 +647,21 @@ def cv_fit_single_run(
     train_accs = np.array([fr.get('train_acc', np.nan) for fr in fold_results])
     test_accs = np.array([fr.get('test_acc', np.nan) for fr in fold_results])
 
+    _n_bad = int(np.sum(~np.isfinite(test_lls)))
+    if _n_bad:
+        logging.getLogger(__name__).warning(
+            "%d/%d folds had non-finite test_ll (gen=%s, model=%s, run=%s); "
+            "excluded from aggregates instead of poisoning the confusion cell.",
+            _n_bad, len(test_lls), generator, model_name, run_id,
+        )
+
     def _mean_std(arr):
         arr = arr.astype(float)
+        # Exclude non-finite values (e.g. a -inf fold from a failed fit) rather
+        # than letting them propagate: np.nanmean drops NaN but not +/-inf.
+        arr = np.where(np.isfinite(arr), arr, np.nan)
+        if not np.any(np.isfinite(arr)):
+            return float('nan'), float('nan')
         return float(np.nanmean(arr)), float(np.nanstd(arr))
 
     mean_train_ll, std_train_ll = _mean_std(train_lls)

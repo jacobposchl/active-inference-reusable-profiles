@@ -72,28 +72,33 @@ def find_reversals(context_series):
     return list(np.where(ctx[1:] != ctx[:-1])[0] + 1)
 
 
-def trial_accuracy(choice_labels, context_series):
+def trial_accuracy(choice_labels, better_arm_series):
     """
-    Compute trial-by-trial accuracy.
-    
+    Compute trial-by-trial accuracy: did the action select the currently better arm?
+
     Parameters:
     -----------
     choice_labels : list
-        Action labels per trial
-    context_series : list
-        True context per trial
-        
+        Action labels per trial (e.g. 'act_left', 'act_right', 'act_hint').
+    better_arm_series : list
+        Which arm is better on each trial. Accepts either the environment's
+        'left'/'right' values (as logged in 'current_better_arm') or the
+        'left_better'/'right_better' forms; matched by substring so both work.
+        Note: pass the better-arm series, NOT the volatility context
+        ('volatile'/'stable'), which carries no arm information.
+
     Returns:
     --------
     accuracy : np.ndarray
-        Binary accuracy per trial (1 = correct, 0 = incorrect)
+        Binary accuracy per trial (1 = chose better arm, 0 = did not).
     """
     acc = []
-    for a, c in zip(choice_labels, context_series):
-        if c == 'left_better':
-            acc.append(1 if a in ('act_left', 'left') else 0)
-        elif c == 'right_better':
-            acc.append(1 if a in ('act_right', 'right') else 0)
+    for a, c in zip(choice_labels, better_arm_series):
+        c = str(c)
+        if 'left' in c:
+            acc.append(1 if 'left' in str(a) else 0)
+        elif 'right' in c:
+            acc.append(1 if 'right' in str(a) else 0)
         else:
             acc.append(0)
     return np.array(acc, dtype=float)
@@ -164,8 +169,9 @@ def print_trial_details(t, env, qs, gamma_t, action_label, obs_labels, show=True
     q_choice = qs[1]
     H_context = compute_entropy(q_context)
     
-    correct = "✓" if ((env.context == 'left_better' and 'left' in action_label) or
-                      (env.context == 'right_better' and 'right' in action_label)) else "✗"
+    better_arm = getattr(env, 'current_better_arm', None)
+    correct = "✓" if ((better_arm == 'left' and 'left' in action_label) or
+                      (better_arm == 'right' and 'right' in action_label)) else "✗"
     
     print(f"t={t:3d} | True:{env.context:12s} | Action:{action_label:12s} {correct} | "
           f"Reward:{obs_labels[1]:14s} | "

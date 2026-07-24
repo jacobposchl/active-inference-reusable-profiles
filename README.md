@@ -14,33 +14,31 @@ The project investigates whether agents can improve performance by maintaining m
 
 ```
 reusable_profiles/
-├── README.md                     
+├── README.md
 ├── requirements.txt              # Python dependencies
 ├── config/
-│   └── experiment_config.py     # Global configuration parameters
+│   └── experiment_config.py      # Global configuration + model/profile defaults
 ├── src/
-│   ├── __init__.py
 │   ├── models/
-│   │   ├── __init__.py
-│   │   ├── generative_model.py  # A, B, D matrices for agent beliefs
-│   │   ├── value_functions.py   # M1, M2, M3 value function implementations
-│   │   └── agent_wrapper.py     # AgentRunner and AgentRunnerWithLL classes
+│   │   ├── generative_model.py   # A, B, D matrices for agent beliefs
+│   │   ├── value_functions.py    # M1, M2, M3 value functions (-> C_t, E_t, gamma_t)
+│   │   └── agent_wrapper.py      # AgentRunner + episode / log-likelihood helpers
 │   ├── environment/
-│   │   ├── __init__.py
-│   │   └── two_armed_bandit.py  # TwoArmedBandit environment class
+│   │   └── two_armed_bandit.py   # TwoArmedBandit environment
 │   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── recovery_helpers.py  # Shared CV/grid-search logic + artifact writers
-│   │   └── plotting.py          # Visualization helpers
+│   │   ├── recovery_helpers.py   # K-fold CV grid-search fitting + artifact writers
+│   │   ├── ll_eval.py            # Teacher-forced per-trial action log-likelihood
+│   │   ├── model_utils.py        # Model factory + free-parameter counts
+│   │   ├── simulate.py           # Baseline (epsilon-greedy / softmax) generators
+│   │   ├── helpers.py            # Entropy, reversals, accuracy, misc utilities
+│   │   └── plotting.py           # Visualization helpers
 │   └── experiments/
-│       ├── __init__.py
-│       └── model_recovery.py    # K-fold CV experiment and CLI
-├── test_scripts/
-│   └── smoke_cv_demo.py         # Tiny wrapper around the model_recovery CLI
-├── results/
-│   └── model_recovery/          # Structured outputs (trial/fold/run/confusion)
-└── tests/
-    └── ...                      # Pytest suites for env/models/experiments
+│       └── model_recovery.py     # K-fold CV recovery experiment + CLI
+├── figure_scripts/
+│   ├── fig_model_recovery_aic.py    # AIC confusion-matrix figure
+│   └── fig_mechanistic_analysis.py  # M3 mechanistic panels
+└── results/
+    └── model_recovery/           # Structured outputs (trial/fold/run/confusion)
 ```
 
 

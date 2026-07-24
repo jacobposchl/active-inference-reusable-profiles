@@ -209,7 +209,7 @@ def main():
     parser.add_argument(
         '--results-dir', 
         type=str, 
-        default='results/model_recovery/run_20251125_142037',
+        required=True,
         help='Path to model recovery results directory'
     )
     parser.add_argument(

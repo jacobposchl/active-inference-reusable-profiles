@@ -147,7 +147,9 @@ def run_model_recovery(
     num_trials : int
         Number of bandit trials per run.
     seed : int
-        Random seed controlling generation and fold shuffling.
+        Random seed controlling data generation. Folds are consecutive,
+        contiguous trial blocks (not shuffled), so the seed does not affect
+        fold assignment.
     reversal_interval : int
         Interval at which latent context reverses; if None, uses default schedule.
     K : int
