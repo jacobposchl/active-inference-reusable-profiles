@@ -478,7 +478,7 @@ def cv_fit_single_run(
 
         elif model_name == 'M3':
             policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
-            gamma_vals = [1.0, 2.5, 5.0]
+            gamma_vals = [1.0, 2.0, 2.5, 3.0, 4.0, 5.0]
             xi_scale_hint = [0.5, 1.0, 2.0, 4.0] 
             xi_scale_arm = [0.5, 1.0, 2.0] 
             
