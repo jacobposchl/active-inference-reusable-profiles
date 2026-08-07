@@ -851,6 +851,13 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         # Infer policies and get posterior over policies
         q_pi, efe = runner.agent.infer_policies()
 
+        # Policy-posterior entropy H[q(pi)] and better-arm belief entropy (nats).
+        # H[q(pi)] varies with the EFE landscape even at fixed gamma (M1), so it
+        # captures uncertainty-sensitivity that gamma alone does not show.
+        policy_entropy = float(compute_entropy(np.asarray(q_pi, dtype=float)))
+        q_better_arm = np.asarray(qs[1], dtype=float)
+        better_arm_entropy = float(compute_entropy(q_better_arm))
+
         # Compute action probabilities by summing q_pi over policies whose
         # first action for choice factor (index 2) matches each action index
         num_actions = len(ACTION_CHOICES)
@@ -912,7 +919,10 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
             'predicted_action': pred_action,
             'action_probs': action_probs.tolist(),
             'belief_context': q_context.tolist(),
+            'belief_better_arm': q_better_arm.tolist(),
             'gamma': float(runner.agent.gamma),
+            'policy_entropy': policy_entropy,
+            'better_arm_entropy': better_arm_entropy,
             'll': float(ll_t),
             'accuracy': int(acc),
             'is_reversal': is_reversal,
@@ -960,7 +970,10 @@ def save_trial_level_csv(rows, out_path):
         'predicted_action',
         'action_probs',
         'belief_context',
+        'belief_better_arm',
         'gamma',
+        'policy_entropy',
+        'better_arm_entropy',
         'll',
         'accuracy',
         'is_reversal',
@@ -986,7 +999,10 @@ def save_trial_level_csv(rows, out_path):
                 r['predicted_action'],
                 _json.dumps(r['action_probs']),
                 _json.dumps(r['belief_context']),
+                _json.dumps(r['belief_better_arm']),
                 f"{r['gamma']:.6f}",
+                f"{r['policy_entropy']:.6f}",
+                f"{r['better_arm_entropy']:.6f}",
                 f"{r['ll']:.6f}",
                 r['accuracy'],
                 r['is_reversal'],

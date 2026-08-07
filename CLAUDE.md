@@ -19,7 +19,8 @@ Outputs land in `results/model_recovery/run_<id>/` — per-trial / fold / run CS
 - `src/utils/ll_eval.py` — per-trial action log-likelihood.
 - `src/utils/recovery_helpers.py` — K-fold CV grid-search fitting, confusion tables, artifact writers.
 - `src/experiments/model_recovery.py` — orchestration + CLI.
-- `figure_scripts/` — publication figures (AIC confusion matrix; M3 mechanistic panels).
+- `figures.py` — publication figures (AIC confusion matrix + M3 mechanistic panels), pure pandas/matplotlib.
+- `reproduce.py` — runs the experiment and renders both figures from one run dir; `make_synthetic_run.py` writes a synthetic run for fast, pymdp-free figure iteration.
 
 ## Environment
 `pip install -r requirements.txt` (built on `inferactively-pymdp==0.0.7.1`).

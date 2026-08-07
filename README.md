@@ -16,6 +16,10 @@ The project investigates whether agents can improve performance by maintaining m
 reusable_profiles/
 ├── README.md
 ├── requirements.txt              # Python dependencies
+├── reproduce.py                  # Run the experiment + render both figures (one command)
+├── figures.py                    # Figure renderer (AIC confusion matrix + M3 mechanistic panels)
+├── make_synthetic_run.py         # Synthetic run dir for fast figure iteration (no pymdp)
+├── fonts/                        # Bundled Roboto TTFs used by the figures
 ├── config/
 │   └── experiment_config.py      # Global configuration + model/profile defaults
 ├── src/
@@ -34,9 +38,6 @@ reusable_profiles/
 │   │   └── plotting.py           # Visualization helpers
 │   └── experiments/
 │       └── model_recovery.py     # K-fold CV recovery experiment + CLI
-├── figure_scripts/
-│   ├── fig_model_recovery_aic.py    # AIC confusion-matrix figure
-│   └── fig_mechanistic_analysis.py  # M3 mechanistic panels
 └── results/
     └── model_recovery/           # Structured outputs (trial/fold/run/confusion)
 ```

@@ -23,49 +23,26 @@ import sys
 import matplotlib
 matplotlib.use('Agg')
 
-# Repo root on the path so 'src' and 'figure_scripts' import cleanly.
+# Repo root on the path so 'src' and 'figures' import cleanly.
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from src.experiments.model_recovery import run_model_recovery
-from figure_scripts.fig_model_recovery_aic import (
-    load_confusion_matrices,
-    print_summary_stats,
-    create_model_recovery_figure,
-)
-from figure_scripts.fig_mechanistic_analysis import (
-    load_trial_data,
-    print_mechanistic_summary,
-    create_mechanistic_figure,
-)
+# Polished figure renderer (pure pandas/matplotlib; no pymdp).
+from figures import apply_style, fig_aic, fig_mechanistic, fig_context_precision
 
 
 def build_figures(results_dir, figures_dir):
-    """Generate both paper figures from a single results directory.
+    """Render both paper figures from a single results directory (via figures.py).
 
     Figures are written under a per-run subfolder so each run's outputs are
     self-contained and traceable to the run that produced them.
     """
+    apply_style()
     run_label = os.path.basename(os.path.normpath(results_dir))
     out_dir = os.path.join(figures_dir, run_label)
     os.makedirs(out_dir, exist_ok=True)
-
-    # Figure 2 -- AIC model-recovery confusion matrix.
-    aic_path = os.path.join(out_dir, 'model_recovery_aic.png')
-    aic_mean, aic_se = load_confusion_matrices(results_dir)
-    print_summary_stats(aic_mean, aic_se)
-    create_model_recovery_figure(aic_mean, aic_se, aic_path)
-
-    # Figure 1 -- M3 mechanistic panels.
-    mech_path = os.path.join(out_dir, 'mechanistic_analysis.png')
-    data = load_trial_data(results_dir, generator='M3')
-    if not data:
-        raise SystemExit(
-            f"[reproduce] no trial-level data under {results_dir}; "
-            "cannot build the mechanistic figure."
-        )
-    print_mechanistic_summary(data, run_idx=0)
-    create_mechanistic_figure(data, mech_path, run_idx=0, results_dir=results_dir)
-
+    fig_aic(results_dir, os.path.join(out_dir, 'model_recovery_aic.png'))
+    fig_mechanistic(results_dir, os.path.join(out_dir, 'mechanistic_analysis.png'))
+    fig_context_precision(results_dir, os.path.join(out_dir, 'context_precision.png'))
     return out_dir
 
 
@@ -111,6 +88,7 @@ def main():
             p.error(f"--results-dir does not exist: {run_dir}")
         print(f"[reproduce] figures-only from {run_dir}")
     else:
+        from src.experiments.model_recovery import run_model_recovery  # lazy: only the full run needs pymdp
         cpu_total = os.cpu_count() or 1
         workers = max(1, cpu_total - args.reserve_cores)
         os.environ['MODEL_COMP_MAX_WORKERS'] = str(workers)
