@@ -89,15 +89,30 @@ def evaluate_ll_with_valuefn_masked(value_fn, A, B, D, ref_logs, mask_indices):
     ll_seq : list of float
         Full per-trial log-likelihood sequence
     """
-    total, ll_seq = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    _, ll_seq = evaluate_ll_with_valuefn(value_fn, A, B, D, ref_logs)
+    return sum_over_mask(ll_seq, mask_indices), ll_seq
+
+
+def sum_over_mask(ll_seq, mask_indices):
+    """Sum a per-trial log-likelihood vector over `mask_indices`.
+
+    Summation runs in trial order, so the result does not depend on how
+    `mask_indices` is ordered, nor on whether `ll_seq` came from a fresh replay
+    or from a cached one. That is what lets a single replay serve every CV fold.
+
+    Returns -inf for a missing vector (a replay that raised in a worker), which
+    scores that candidate out of contention in every fold.
+    """
+    if ll_seq is None:
+        return float('-inf')
     mask_set = set(int(i) for i in (mask_indices or []))
     if not mask_set:
-        return 0.0, ll_seq
+        return 0.0
     masked_sum = 0.0
     for idx, ll in enumerate(ll_seq):
         if idx in mask_set:
             masked_sum += float(ll)
-    return float(masked_sum), ll_seq
+    return float(masked_sum)
 
 
 # Worker helpers for optional parallel evaluation. These reuse globals initialized
@@ -168,21 +183,33 @@ def _eval_m1_gamma(A, B, D, g_val, ref_logs):
     return total_ll
 
 
-def _eval_m1_gamma_masked(A, B, D, g_val, ref_logs, mask_indices):
-    """Worker helper: evaluate M1 gamma on masked trials (sum over mask_indices)."""
+def _eval_m1_gamma_ll_seq(A, B, D, g_val, ref_logs):
+    """Worker helper: full per-trial log-likelihood vector for M1 at `g_val`.
+
+    The replay is teacher-forced on the recorded observations and actions, so
+    the returned vector does not depend on any train/test split. One call
+    therefore supplies the scores for every CV fold: each fold sums this same
+    vector over its own trial indices (see `sum_over_mask`).
+    """
     if A is None:
         try:
             A_loc = A_GLOB
             B_loc = B_GLOB
             D_loc = D_GLOB
         except NameError:
-            raise RuntimeError("Worker globals not initialized for _eval_m1_gamma_masked")
+            raise RuntimeError("Worker globals not initialized for _eval_m1_gamma_ll_seq")
     else:
         A_loc, B_loc, D_loc = A, B, D
 
     value_fn = make_value_fn('M1', C_reward_logits=M1_DEFAULTS['C_reward_logits'], gamma=g_val)
-    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
-    return total_ll
+    _, ll_seq = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return ll_seq
+
+
+def _eval_m1_gamma_masked(A, B, D, g_val, ref_logs, mask_indices):
+    """Worker helper: evaluate M1 gamma on masked trials (sum over mask_indices)."""
+    ll_seq = _eval_m1_gamma_ll_seq(A, B, D, g_val, ref_logs)
+    return sum_over_mask(ll_seq, mask_indices)
 
 
 def _eval_m2_params(A, B, D, g_base, k, ref_logs):
@@ -227,14 +254,18 @@ def _eval_m2_params(A, B, D, g_base, k, ref_logs):
     return total_ll
 
 
-def _eval_m2_params_masked(A, B, D, g_base, k, ref_logs, mask_indices):
+def _eval_m2_params_ll_seq(A, B, D, g_base, k, ref_logs):
+    """Worker helper: full per-trial log-likelihood vector for M2 at (g_base, k).
+
+    Fold-independent for the same reason as `_eval_m1_gamma_ll_seq`.
+    """
     if A is None:
         try:
             A_loc = A_GLOB
             B_loc = B_GLOB
             D_loc = D_GLOB
         except NameError:
-            raise RuntimeError("Worker globals not initialized for _eval_m2_params_masked")
+            raise RuntimeError("Worker globals not initialized for _eval_m2_params_ll_seq")
     else:
         A_loc, B_loc, D_loc = A, B, D
 
@@ -243,8 +274,13 @@ def _eval_m2_params_masked(A, B, D, g_base, k, ref_logs, mask_indices):
         return g_base / (1.0 + k * H_better_arm)
 
     value_fn = make_value_fn('M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule)
-    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
-    return total_ll
+    _, ll_seq = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return ll_seq
+
+
+def _eval_m2_params_masked(A, B, D, g_base, k, ref_logs, mask_indices):
+    ll_seq = _eval_m2_params_ll_seq(A, B, D, g_base, k, ref_logs)
+    return sum_over_mask(ll_seq, mask_indices)
 
 
 def _eval_m3_params_per_profile(A, B, D, gammas, xi_scales_profile, ref_logs):
@@ -293,7 +329,31 @@ def _eval_m3_params_per_profile(A, B, D, gammas, xi_scales_profile, ref_logs):
     return total_ll
 
 
-def _eval_m3_params_per_profile_masked(A, B, D, gammas, xi_scales_profile, ref_logs, mask_indices):
+def build_m3_profiles(gammas, xi_scales_profile):
+    """Apply per-profile gammas and xi scales to the M3 default profiles."""
+    profiles = []
+    for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
+        prof = dict(p)
+        prof['gamma'] = float(gammas[p_idx])
+        orig_xi = np.array(p['xi_logits'], float)
+        scales3 = xi_scales_profile[p_idx]
+        new_xi = orig_xi.copy()
+        # scales3 expected to be length-3 for [hint,left,right]
+        new_xi[1] = orig_xi[1] * float(scales3[0])
+        new_xi[2] = orig_xi[2] * float(scales3[1])
+        new_xi[3] = orig_xi[3] * float(scales3[2])
+        prof['xi_logits'] = new_xi.tolist()
+        profiles.append(prof)
+    return profiles
+
+
+def _eval_m3_params_per_profile_ll_seq(A, B, D, gammas, xi_scales_profile, ref_logs):
+    """Worker helper: full per-trial log-likelihood vector for an M3 candidate.
+
+    Fold-independent for the same reason as `_eval_m1_gamma_ll_seq`. This is the
+    hot path of the whole experiment, so the vector is returned once and reused
+    across every fold rather than being recomputed per fold.
+    """
     if A is None:
         try:
             policies = M3_POLICIES_GLOB
@@ -312,19 +372,12 @@ def _eval_m3_params_per_profile_masked(A, B, D, gammas, xi_scales_profile, ref_l
         num_actions_per_factor = [len(ACTION_CONTEXTS), len(ACTION_BETTER_ARM), len(ACTION_CHOICES)]
         A_loc, B_loc, D_loc = A, B, D
 
-    profiles = []
-    for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
-        prof = dict(p)
-        prof['gamma'] = float(gammas[p_idx])
-        orig_xi = np.array(p['xi_logits'], float)
-        scales3 = xi_scales_profile[p_idx]
-        new_xi = orig_xi.copy()
-        new_xi[1] = orig_xi[1] * float(scales3[0])
-        new_xi[2] = orig_xi[2] * float(scales3[1])
-        new_xi[3] = orig_xi[3] * float(scales3[2])
-        prof['xi_logits'] = new_xi.tolist()
-        profiles.append(prof)
-
+    profiles = build_m3_profiles(gammas, xi_scales_profile)
     value_fn = make_value_fn('M3', profiles=profiles, Z=np.array(M3_DEFAULTS['Z']), policies=policies, num_actions_per_factor=num_actions_per_factor)
-    total_ll, _ = evaluate_ll_with_valuefn_masked(value_fn, A_loc, B_loc, D_loc, ref_logs, mask_indices)
-    return total_ll
+    _, ll_seq = evaluate_ll_with_valuefn(value_fn, A_loc, B_loc, D_loc, ref_logs)
+    return ll_seq
+
+
+def _eval_m3_params_per_profile_masked(A, B, D, gammas, xi_scales_profile, ref_logs, mask_indices):
+    ll_seq = _eval_m3_params_per_profile_ll_seq(A, B, D, gammas, xi_scales_profile, ref_logs)
+    return sum_over_mask(ll_seq, mask_indices)

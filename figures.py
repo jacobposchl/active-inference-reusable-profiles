@@ -15,6 +15,7 @@ import os
 import ast
 import glob
 import argparse
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -29,11 +30,6 @@ MODEL_LS = {"M1": "-", "M2": "--", "M3": ":"}                 # print/CVD fallba
 CTX = {"volatile": "#cb6f60", "stable": "#5f8fbb"}           # soft red / blue (profiles)
 INK = INK2 = INK3 = "#000000"                                 # all chrome/text is black
 GRID = "#c9c9c9"                                              # grey horizontal gridlines
-
-# M3 generating template (config M3_DEFAULTS: profile gammas [2, 4], Z = identity).
-M3_GEN_GAMMA = (2.0, 4.0)
-GEN_C = "#1f8a63"    # generator (template) gamma_t line
-REC_C = "#9a9a9a"    # recovered (fitted) gamma_t line
 
 # Register bundled Roboto (if present in ./fonts) so the figures use it everywhere.
 _FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
@@ -56,7 +52,7 @@ def apply_style():
         "font.family": FONT_FAMILY, "font.size": 9,
         "axes.titlesize": 15, "axes.titleweight": "bold",
         "axes.labelsize": 14, "axes.labelweight": "normal", "xtick.labelsize": 9, "ytick.labelsize": 9,
-        "legend.fontsize": 10.5, "legend.frameon": True,
+        "legend.fontsize": 10.5, "legend.frameon": True, "legend.loc": "upper left",
         "legend.facecolor": "#ececec", "legend.edgecolor": "#9a9a9a", "legend.framealpha": 1.0,
         "legend.handlelength": 1.6, "legend.handleheight": 1.4, "legend.handletextpad": 0.6,
         "axes.edgecolor": INK, "axes.linewidth": 1.5,
@@ -91,25 +87,57 @@ def panel_tag(ax, letter):
 
 
 # ============================ DATA ============================
-def load_runs(run_dir, model, generator="M3"):
-    """List of per-run DataFrames for `model` fitted to `generator`'s data."""
+def _efe_separation(efe):
+    """dG = G(pi_2nd-best) - G(pi_best), with "best" the lowest-EFE policy.
+
+    Non-negative by construction; nan when a trial evaluated fewer than two
+    policies. Assumes the logged vector is EFE (lower is better) rather than
+    negative EFE -- flip the sort if the upstream convention changes.
+    """
+    a = np.sort(np.asarray(efe, dtype=float))
+    return float(a[1] - a[0]) if a.size >= 2 else float("nan")
+
+
+def load_runs(run_dir, model, generator="M3", fold=0):
+    """List of per-run DataFrames for `model` fitted to `generator`'s data.
+
+    Each CSV holds the same trial sequence replayed once per CV fold, so the file
+    is K x the run length and every reversal appears K times. Those replays are
+    duplicates of one run, not independent samples, so we keep a single fold and
+    pool across the genuinely independent `run_*` files instead.
+    """
     pat = os.path.join(run_dir, "trial_level", f"gen_{generator}", f"model_{model}", "run_*.csv")
     dfs = []
     for f in sorted(glob.glob(pat)):
         df = pd.read_csv(f)
+        # Only the real pipeline replicates the trial sequence per fold; there `t`
+        # repeats K times. The synthetic run writes 400 unique trials with `fold`
+        # as a per-trial label (t % 5), so filtering it would gut the sequence.
+        if fold is not None and "fold" in df.columns and df["t"].duplicated().any():
+            # reset now: aligned()/around_reversal() index positionally off a clean RangeIndex
+            df = df[df["fold"] == fold].reset_index(drop=True)
         w = df["belief_context"].apply(ast.literal_eval)
         df["w0"] = w.apply(lambda x: float(x[0]))   # volatile-profile weight = q(volatile)
         df["w1"] = w.apply(lambda x: float(x[1]))   # stable-profile weight   = q(stable)
-        # M3 generator's effective precision (template gammas under identity Z):
-        # gamma_t = q(volatile)*gamma0 + q(stable)*gamma1. Exact from the logged belief.
-        df["gen_gamma"] = M3_GEN_GAMMA[0] * df["w0"] + M3_GEN_GAMMA[1] * df["w1"]
+        # EFE separation: how far the runner-up policy sits behind the best one,
+        #   dG_t = G_t(pi_2nd-best) - G_t(pi_best),  "best" = lowest EFE.
+        # Since q(pi) = sigma(-gamma * G), this is the gamma-independent driver of
+        # policy-posterior entropy: a small dG leaves q(pi) flat however large
+        # gamma is, so M1 can track uncertainty at fixed gamma through dG alone.
+        # Accepts either a pre-summarised `efe_sep` or a per-trial `efe` vector.
+        if "efe_sep" not in df.columns and "efe" in df.columns:
+            e = df["efe"].apply(ast.literal_eval)
+            df["efe_sep"] = e.apply(_efe_separation)
         dfs.append(df.reset_index(drop=True))
     return dfs
 
 
 def aligned(dfs, col, direction, pre=10, post=40):
-    """Mean of `col` in a [-pre, +post] window around context reversals of a
-    given direction ('v2s' volatile->stable, or 's2v')."""
+    """Mean and SD of `col` in a [-pre, +post] window around context reversals of
+    a given direction ('v2s' volatile->stable, or 's2v').
+
+    Returns (mean, sd, xs, n_segments); sd is across reversal segments.
+    """
     segs = []
     for df in dfs:
         for r in df.index[df["is_reversal"] == 1]:
@@ -121,9 +149,9 @@ def aligned(dfs, col, direction, pre=10, post=40):
             if ok:
                 segs.append(df[col].iloc[r - pre:r + post].to_numpy())
     if not segs:
-        return None, None, 0
+        return None, None, None, 0
     a = np.vstack(segs)
-    return a.mean(0), np.arange(-pre, post), len(segs)
+    return a.mean(0), a.std(0), np.arange(-pre, post), len(segs)
 
 
 def around_reversal(dfs, col, pre=20, post=20):
@@ -141,7 +169,11 @@ def around_reversal(dfs, col, pre=20, post=20):
 
 
 def binned(dfs, xcol, ycol, nbins=8, xmax=None):
-    """Mean of ycol within equal-width bins of xcol, pooled across runs."""
+    """Mean of ycol within equal-width bins of xcol, pooled across runs.
+
+    Returns (centres, mean, sem); sem is nan where a bin holds fewer than two
+    non-nan trials.
+    """
     d = pd.concat(dfs, ignore_index=True)
     x = d[xcol].to_numpy(dtype=float)
     y = d[ycol].to_numpy(dtype=float)
@@ -149,12 +181,17 @@ def binned(dfs, xcol, ycol, nbins=8, xmax=None):
     edges = np.linspace(0.0, hi, nbins + 1)
     ctr = 0.5 * (edges[:-1] + edges[1:])
     ym = np.full(nbins, np.nan)
+    ys = np.full(nbins, np.nan)
     for i in range(nbins):
         lo, up = edges[i], edges[i + 1]
         m = (x >= lo) & (x <= up) if i == nbins - 1 else (x >= lo) & (x < up)
         if m.any():
-            ym[i] = np.nanmean(y[m])
-    return ctr, ym
+            yi = y[m]
+            ym[i] = np.nanmean(yi)
+            n = int(np.count_nonzero(~np.isnan(yi)))
+            if n > 1:
+                ys[i] = float(np.nanstd(yi, ddof=1) / np.sqrt(n))
+    return ctr, ym, ys
 
 
 def by_context(dfs, fn):
@@ -194,7 +231,28 @@ def fig_aic(run_dir, out_path):
 # ============================ FIGURE 1: MECHANISTIC ============================
 def fig_mechanistic(run_dir, out_path):
     runs = {m: load_runs(run_dir, m) for m in ("M1", "M2", "M3")}
-    has_pe = all(c in runs["M1"][0].columns for c in ("policy_entropy", "better_arm_entropy"))
+    pe_cols = ("policy_entropy", "better_arm_entropy")
+    missing_pe = [c for c in pe_cols if c not in runs["M1"][0].columns]
+    has_pe = not missing_pe
+    if missing_pe:
+        # Runs written before the entropy columns existed would otherwise blank out
+        # panels D, G and H with no indication that anything was dropped.
+        warnings.warn(
+            f"{run_dir}: trial-level CSVs are missing {', '.join(missing_pe)}; "
+            "panels D, G and H (policy entropy) will render blank. Re-run the "
+            "experiment to regenerate the run with these columns.",
+            stacklevel=2,
+        )
+
+    has_efe = "efe_sep" in runs["M1"][0].columns
+    if not has_efe:
+        warnings.warn(
+            f"{run_dir}: trial-level CSVs carry no `efe_sep` (or `efe`) column; "
+            "panel H (policy entropy vs. EFE separation) will render blank. The EFE "
+            "vector is computed in recovery_helpers._generate_trial_level_predictions "
+            "but currently discarded -- log it and re-run to fill this panel.",
+            stacklevel=2,
+        )
 
     fig, axes = plt.subplots(2, 4, figsize=(18, 8.5))
     (axA, axB, axC, axD), (axE, axF, axG, axH) = axes
@@ -204,18 +262,20 @@ def fig_mechanistic(run_dir, out_path):
         (axA, "v2s", "Profile recruitment: volatile → stable", "A"),
         (axB, "s2v", "Profile recruitment: stable → volatile", "B"),
     ]:
-        w0, xs, n = aligned(runs["M3"], "w0", direction)
-        w1, _, _ = aligned(runs["M3"], "w1", direction)
+        w0, w0sd, xs, n = aligned(runs["M3"], "w0", direction)
+        w1, w1sd, _, _ = aligned(runs["M3"], "w1", direction)
         if w0 is not None:
-            ax.plot(xs, w0, color=CTX["volatile"], lw=2, label="$w_0$ volatile profile")
-            ax.plot(xs, w1, color=CTX["stable"], lw=2, label="$w_1$ stable profile")
+            for mu, sd, key, lab in [(w0, w0sd, "volatile", "$w_0$ volatile profile"),
+                                     (w1, w1sd, "stable", "$w_1$ stable profile")]:
+                ax.plot(xs, mu, color=CTX[key], lw=2, label=lab)
+                ax.fill_between(xs, mu - sd, mu + sd, color=CTX[key], alpha=0.15, linewidth=0)
         ax.axvline(0, color=INK3, lw=1, ls="--")
         ax.set_title(f"{title}\n({n} reversals)")
         ax.set_xlabel("Trials relative to reversal")
         ax.set_ylabel("Profile weight")
         ax.set_ylim(0, 1)
         swatch_legend(ax, [("$w_0$ volatile profile", CTX["volatile"]),
-                           ("$w_1$ stable profile", CTX["stable"])], loc="center right")
+                           ("$w_1$ stable profile", CTX["stable"])])
         clean(ax, "y")
         panel_tag(ax, tag)
 
@@ -226,7 +286,7 @@ def fig_mechanistic(run_dir, out_path):
     axC.axvline(0, color=INK3, lw=1, ls="--")
     axC.set_title("Effective precision around reversals")
     axC.set_xlabel("Trials relative to reversal")
-    axC.set_ylabel(r"Effective $\gamma_t$")
+    axC.set_ylabel(r"$\gamma_t^{\mathrm{eff}}$")
     axC.legend()
     clean(axC, "y")
     panel_tag(axC, "C")
@@ -283,34 +343,38 @@ def fig_mechanistic(run_dir, out_path):
     clean(axF, "y")
     panel_tag(axF, "F")
 
-    # --- G: profile weight over the run (M3), data-driven (no re-sim) ---
-    W0 = np.vstack([df["w0"].to_numpy() for df in runs["M3"]])
-    W1 = np.vstack([df["w1"].to_numpy() for df in runs["M3"]])
-    t = np.arange(W0.shape[1])
-    for W, key, lab in [(W0, "volatile", "$w_0$ volatile profile"),
-                        (W1, "stable", "$w_1$ stable profile")]:
-        mu, sd = W.mean(0), W.std(0)
-        axG.plot(t, mu, color=CTX[key], lw=1.8, label=lab)
-        axG.fill_between(t, mu - sd, mu + sd, color=CTX[key], alpha=0.15, linewidth=0)
-    for r in runs["M3"][0].index[runs["M3"][0]["is_reversal"] == 1]:
-        axG.axvline(r, color=INK3, lw=0.6, ls=":", alpha=0.7)
-    axG.set_title("Profile weights over trials (M3)")
-    axG.set_xlabel("Trial")
-    axG.set_ylabel("Profile weight")
-    axG.set_ylim(0, 1)
-    swatch_legend(axG, [("$w_0$ volatile profile", CTX["volatile"]),
-                        ("$w_1$ stable profile", CTX["stable"])], loc="center right")
-    clean(axG, "y")
-    panel_tag(axG, "G")
-
-    # --- H: policy entropy vs better-arm uncertainty, per model ---
+    # --- G: policy entropy vs better-arm uncertainty, per model ---
     if has_pe:
         for m in ("M1", "M2", "M3"):
-            cx, cy = binned(runs[m], "better_arm_entropy", "policy_entropy",
-                            nbins=8, xmax=float(np.log(2)))
+            cx, cy, _ = binned(runs[m], "better_arm_entropy", "policy_entropy",
+                               nbins=8, xmax=float(np.log(2)))
+            axG.plot(cx, cy, color=MODEL[m], ls=MODEL_LS[m], lw=2, marker="o", ms=4, label=m)
+        axG.set_title("Policy entropy vs. arm uncertainty")
+        axG.set_xlabel(r"H[$q$(better arm)]  (nats)")
+        axG.set_ylabel(r"H[$q(\pi)$]  (nats)")
+        axG.legend()
+        clean(axG, "y")
+    else:
+        axG.axis("off")
+    panel_tag(axG, "G")
+
+    # --- H: policy entropy vs EFE separation, per model ---
+    # dG is the gamma-independent driver of H[q(pi)]: when the top two policies are
+    # nearly tied the posterior stays flat whatever gamma does, so M1's response to
+    # uncertainty (panel G) has to arrive through this axis.
+    if has_pe and has_efe:
+        # Shared upper edge across models so the bins line up and the curves are
+        # comparable; the 99th percentile keeps a thin tail from squashing the rest.
+        pooled = pd.concat([d for m in ("M1", "M2", "M3") for d in runs[m]],
+                           ignore_index=True)["efe_sep"].to_numpy(dtype=float)
+        dg_max = float(np.nanpercentile(pooled, 99)) if np.isfinite(pooled).any() else 1.0
+        for m in ("M1", "M2", "M3"):
+            cx, cy, cs = binned(runs[m], "efe_sep", "policy_entropy",
+                                nbins=8, xmax=dg_max)
             axH.plot(cx, cy, color=MODEL[m], ls=MODEL_LS[m], lw=2, marker="o", ms=4, label=m)
-        axH.set_title("Policy entropy vs. arm uncertainty")
-        axH.set_xlabel(r"H[$q$(better arm)]  (nats)")
+            axH.fill_between(cx, cy - cs, cy + cs, color=MODEL[m], alpha=0.15, linewidth=0)
+        axH.set_title("Policy entropy vs. EFE separation")
+        axH.set_xlabel(r"EFE separation  $\Delta G_t$")
         axH.set_ylabel(r"H[$q(\pi)$]  (nats)")
         axH.legend()
         clean(axH, "y")
@@ -319,61 +383,6 @@ def fig_mechanistic(run_dir, out_path):
     panel_tag(axH, "H")
 
     fig.tight_layout(w_pad=2.5, h_pad=3.0)
-    fig.savefig(out_path)
-    plt.close(fig)
-
-
-# ============================ FIGURE 3: CONTEXT & PRECISION ============================
-def fig_context_precision(run_dir, out_path):
-    """State-context belief and effective precision around regime change.
-
-    The precision row overlays the M3 GENERATING template (gamma=[2,4], which tracks
-    context) with the RECOVERED fit (gamma=[5,5], which is flat) -- clearly labeled so
-    the template is never read as the fitted model.
-    """
-    runs = load_runs(run_dir, "M3")
-
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9.5))
-    (axA, axB), (axC, axD) = axes
-    cols = [("v2s", "volatile → stable", axA, axC, "A", "C"),
-            ("s2v", "stable → volatile", axB, axD, "B", "D")]
-
-    for direction, dname, ax_ctx, ax_gam, tag_ctx, tag_gam in cols:
-        # --- top: state-context belief q(context) ---
-        qv, xs, n = aligned(runs, "w0", direction)
-        qsb, _, _ = aligned(runs, "w1", direction)
-        if qv is not None:
-            ax_ctx.plot(xs, qv, color=CTX["volatile"], lw=2.2, label="q(volatile)")
-            ax_ctx.plot(xs, qsb, color=CTX["stable"], lw=2.2, label="q(stable)")
-        ax_ctx.axvline(0, color=INK3, lw=1, ls="--")
-        ax_ctx.set_title(f"State context: {dname}\n({n} reversals)")
-        ax_ctx.set_xlabel("Trials relative to reversal")
-        ax_ctx.set_ylabel("q(context)")
-        ax_ctx.set_ylim(0, 1)
-        swatch_legend(ax_ctx, [("q(volatile)", CTX["volatile"]),
-                               ("q(stable)", CTX["stable"])], loc="center right")
-        clean(ax_ctx, "y")
-        panel_tag(ax_ctx, tag_ctx)
-
-        # --- bottom: effective precision, generator (template) vs recovered (fit) ---
-        gg, _, _ = aligned(runs, "gen_gamma", direction)
-        rg, _, _ = aligned(runs, "gamma", direction)
-        if gg is not None:
-            ax_gam.plot(xs, gg, color=GEN_C, lw=2.6, label="generator (γ = [2, 4])")
-            ax_gam.plot(xs, rg, color=REC_C, lw=2.2, ls="--", label="recovered fit (γ = [5, 5])")
-        ax_gam.axvline(0, color=INK3, lw=1, ls="--")
-        ax_gam.set_title(f"Effective precision: {dname}")
-        ax_gam.set_xlabel("Trials relative to reversal")
-        ax_gam.set_ylabel(r"Effective $\gamma_t$")
-        ax_gam.set_ylim(1.5, 5.5)
-        ax_gam.legend(loc="center right")
-        clean(ax_gam, "y")
-        panel_tag(ax_gam, tag_gam)
-
-    fig.suptitle("State context & effective precision around regime change\n"
-                 "M3 generative template (γ = [2, 4])  vs  recovered fit (γ = [5, 5])",
-                 fontsize=14, fontweight="bold")
-    fig.tight_layout(w_pad=2.5, h_pad=3.0, rect=(0, 0, 1, 0.93))
     fig.savefig(out_path)
     plt.close(fig)
 
@@ -392,11 +401,9 @@ def main():
 
     aic_path = os.path.join(out_dir, "model_recovery_aic.png")
     mech_path = os.path.join(out_dir, "mechanistic_analysis.png")
-    ctx_path = os.path.join(out_dir, "context_precision.png")
     fig_aic(args.results_dir, aic_path)
     fig_mechanistic(args.results_dir, mech_path)
-    fig_context_precision(args.results_dir, ctx_path)
-    print(f"wrote:\n  {aic_path}\n  {mech_path}\n  {ctx_path}")
+    print(f"wrote:\n  {aic_path}\n  {mech_path}")
 
 
 if __name__ == "__main__":

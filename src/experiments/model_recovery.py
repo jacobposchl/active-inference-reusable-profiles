@@ -14,13 +14,18 @@ import argparse
 import os
 import logging
 import random
-import shutil
 import json
-import numpy as np
-from tqdm import tqdm
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+# Thread limits must be set before numpy is first imported, so this stdlib-only
+# import comes before numpy and anything that pulls it in.
+from src.cpu_config import WORKER_ENV_VAR, limit_blas_threads, resolve_worker_count
+limit_blas_threads()
+
+import numpy as np
+from tqdm import tqdm
 
 from src.utils.recovery_helpers import (
     generate_all_runs,
@@ -387,8 +392,10 @@ def _parse_args():
     parser.add_argument(
         "--reserve-cores",
         type=int,
-        default=10,
-        help="Number of CPU cores to reserve for system (remaining cores used for parallel grid search).",
+        default=None,
+        help="CPU cores to leave free during grid search. Default: none under a "
+             "SLURM/cgroup allocation (those cores are already exclusively ours), "
+             "a small share of the machine otherwise.",
     )
     return parser.parse_args()
 
@@ -408,11 +415,11 @@ if __name__ == '__main__':
     random.seed(args.seed)
     np.random.seed(args.seed)
     
-    # Configure worker processes to use most CPU cores for parallel grid search
-    _cpu_total = os.cpu_count() or 1
-    _sub_cpu = max(1, _cpu_total - args.reserve_cores)
-    os.environ['MODEL_COMP_MAX_WORKERS'] = str(_sub_cpu)
-    print(f"[model_recovery] Using {_sub_cpu} worker processes (out of {_cpu_total} total, {args.reserve_cores} reserved)")
+    # Size the worker pool to what this machine or allocation actually grants,
+    # then hand the decision down so the fitting code uses the same number.
+    _workers, _worker_desc = resolve_worker_count(reserve=args.reserve_cores)
+    os.environ[WORKER_ENV_VAR] = str(_workers)
+    print(f"[model_recovery] Using {_worker_desc}")
     gens = tuple(g.strip() for g in args.generators.split(",") if g.strip())
     reversal_interval = args.reversal_interval if args.reversal_interval > 0 else None
     

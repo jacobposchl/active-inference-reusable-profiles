@@ -19,19 +19,16 @@ from collections import Counter
 import numpy as np
 
 from src.utils.ll_eval import (
-    compute_sequence_ll_for_model,
     evaluate_ll_with_valuefn,
+    sum_over_mask,
+    build_m3_profiles,
     _worker_init,
-    compute_sequence_ll_for_model_worker,
-    _eval_m1_gamma,
-    _eval_m2_params,
-    _eval_m1_gamma_masked,
-    _eval_m2_params_masked,
-    _eval_m3_params_per_profile,
-    _eval_m3_params_per_profile_masked,
-    evaluate_ll_with_valuefn_masked,
+    _eval_m1_gamma_ll_seq,
+    _eval_m2_params_ll_seq,
+    _eval_m3_params_per_profile_ll_seq,
 )
 
+from src.cpu_config import resolve_worker_count
 from src.models import build_A, build_B, build_D, make_value_fn
 from src.utils.model_utils import create_model, get_num_parameters
 from src.utils.simulate import simulate_baseline_run
@@ -248,6 +245,264 @@ def _make_temp_agent_and_policies(A, B, D):
     return policies, num_actions_per_factor
 
 
+def _batch_ll_seqs(exe, worker_fn, jobs, ref_logs, cache, progress_desc=None):
+    """Fill `cache` with per-trial LL vectors for every job not already in it.
+
+    `jobs` is a sequence of (cache_key, worker_args) pairs. Evaluation is
+    teacher-forced over the full recorded sequence, so a candidate's vector is
+    the same no matter which trials a fold later designates train or test. One
+    replay per distinct parameter setting therefore serves all K folds, which is
+    where the K-fold redundancy is removed.
+
+    Returns the number of replays actually dispatched.
+    """
+    pending = {}
+    for key, args in jobs:
+        if key not in cache and key not in pending:
+            pending[key] = args
+    if not pending:
+        return 0
+
+    fut_map = {
+        exe.submit(worker_fn, None, None, None, *args, ref_logs): key
+        for key, args in pending.items()
+    }
+    completed = concurrent.futures.as_completed(fut_map)
+    if progress_desc:
+        try:
+            from tqdm import tqdm as _tqdm
+            completed = _tqdm(completed, total=len(fut_map), desc=progress_desc,
+                              leave=False, position=2, unit="eval")
+        except ImportError:
+            pass
+
+    for fut in completed:
+        key = fut_map[fut]
+        try:
+            cache[key] = fut.result()
+        except Exception:
+            # A failed replay scores -inf in every fold (see sum_over_mask).
+            cache[key] = None
+    return len(pending)
+
+
+def _search_m1(exe, ref_logs, fold_train_idx, record_grid):
+    """Coarse-then-fine gamma search for M1, sharing replays across folds.
+
+    The coarse grid is fixed, so it is evaluated once for every fold. Each
+    fold's fine grid is centred on its own coarse winner, so folds that agree
+    (the usual case) share those replays too, and folds that disagree cost no
+    more than evaluating each fine grid separately would have.
+    """
+    coarse_g = [0.5, 1.0, 1.5, 2.5, 4.0, 8.0, 12.0, 16.0]
+    cache = {}
+    n_replays = _batch_ll_seqs(
+        exe, _eval_m1_gamma_ll_seq,
+        [(float(g), (float(g),)) for g in coarse_g], ref_logs, cache,
+        progress_desc="    ├─ Grid (M1 coarse)",
+    )
+
+    coarse_state = []
+    fine_grids = []
+    for train_idx in fold_train_idx:
+        scores = {float(g): sum_over_mask(cache[float(g)], train_idx) for g in coarse_g}
+        best_g = max(scores, key=scores.get)
+        coarse_state.append((scores, best_g))
+
+        best_idx = int(coarse_g.index(best_g))
+        lo = coarse_g[max(0, best_idx - 1)]
+        hi = coarse_g[min(len(coarse_g) - 1, best_idx + 1)]
+        if best_idx == 0:
+            lo = max(0.1, coarse_g[0] * 0.5)
+        if best_idx == len(coarse_g) - 1:
+            hi = coarse_g[-1] * 1.25
+        fine_grids.append([float(g) for g in np.linspace(lo, hi, 7)])
+
+    n_replays += _batch_ll_seqs(
+        exe, _eval_m1_gamma_ll_seq,
+        [(g, (g,)) for grid in fine_grids for g in grid], ref_logs, cache,
+        progress_desc="    ├─ Grid (M1 fine)",
+    )
+
+    fold_best, fold_records, fold_evals = [], [], []
+    for k, train_idx in enumerate(fold_train_idx):
+        scores, best_g = coarse_state[k]
+        best_ll = scores[best_g]
+        best_params = {'gamma': best_g}
+        records = []
+        if record_grid:
+            records = [
+                {'fold': k, 'stage': 'coarse', 'gamma': float(g), 'll': float(scores[float(g)])}
+                for g in coarse_g
+            ]
+
+        for g in fine_grids[k]:
+            total = sum_over_mask(cache[g], train_idx)
+            if total > best_ll:
+                best_ll = total
+                best_params = {'gamma': float(g)}
+            if record_grid:
+                records.append({'fold': k, 'stage': 'fine', 'gamma': float(g), 'll': float(total)})
+
+        fold_best.append({
+            'params': best_params,
+            'key': float(best_params['gamma']),
+            'train_ll': best_ll,
+        })
+        fold_records.append(records)
+        fold_evals.append(len(coarse_g) + len(fine_grids[k]))
+
+    return fold_best, fold_records, fold_evals, cache, n_replays
+
+
+def _search_m2(exe, ref_logs, fold_train_idx, record_grid):
+    """Coarse-then-fine (gamma_base, entropy_k) search for M2, replays shared."""
+    coarse_g_base = [0.5, 1.0, 1.5, 2.5, 4.0, 8.0]
+    coarse_k = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0]
+    cache = {}
+    coarse_pairs = [(float(gb), float(kv)) for gb in coarse_g_base for kv in coarse_k]
+    n_replays = _batch_ll_seqs(
+        exe, _eval_m2_params_ll_seq,
+        [(pair, pair) for pair in coarse_pairs], ref_logs, cache,
+        progress_desc="    ├─ Grid (M2 coarse)",
+    )
+
+    coarse_state = []
+    fine_grids = []
+    for train_idx in fold_train_idx:
+        scores = np.zeros((len(coarse_g_base), len(coarse_k)))
+        for i, gb in enumerate(coarse_g_base):
+            for j, kv in enumerate(coarse_k):
+                scores[i, j] = sum_over_mask(cache[(float(gb), float(kv))], train_idx)
+        bi, bj = (int(v) for v in np.unravel_index(np.argmax(scores), scores.shape))
+        coarse_state.append((scores, bi, bj))
+
+        gb_lo = coarse_g_base[max(0, bi - 1)]
+        gb_hi = coarse_g_base[min(len(coarse_g_base) - 1, bi + 1)]
+        if bi == 0:
+            gb_lo = max(0.1, coarse_g_base[0] * 0.5)
+        if bi == len(coarse_g_base) - 1:
+            gb_hi = coarse_g_base[-1] * 1.25
+
+        k_lo = coarse_k[max(0, bj - 1)]
+        k_hi = coarse_k[min(len(coarse_k) - 1, bj + 1)]
+        if bj == 0:
+            k_lo = max(1e-3, coarse_k[0] * 0.5)
+        if bj == len(coarse_k) - 1:
+            k_hi = coarse_k[-1] * 1.5
+
+        fine_grids.append([
+            (float(gb), float(kv))
+            for gb in np.linspace(gb_lo, gb_hi, 6)
+            for kv in np.linspace(k_lo, k_hi, 6)
+        ])
+
+    n_replays += _batch_ll_seqs(
+        exe, _eval_m2_params_ll_seq,
+        [(pair, pair) for grid in fine_grids for pair in grid], ref_logs, cache,
+        progress_desc="    ├─ Grid (M2 fine)",
+    )
+
+    fold_best, fold_records, fold_evals = [], [], []
+    for k, train_idx in enumerate(fold_train_idx):
+        scores, bi, bj = coarse_state[k]
+        best_ll = float(scores[bi, bj])
+        best_key = (float(coarse_g_base[bi]), float(coarse_k[bj]))
+        best_params = {'gamma_base': best_key[0], 'entropy_k': best_key[1]}
+        records = []
+        if record_grid:
+            for i, gb in enumerate(coarse_g_base):
+                for j, kv in enumerate(coarse_k):
+                    records.append({
+                        'fold': k, 'stage': 'coarse', 'gamma_base': float(gb),
+                        'entropy_k': float(kv), 'll': float(scores[i, j]),
+                    })
+
+        for pair in fine_grids[k]:
+            total = sum_over_mask(cache[pair], train_idx)
+            if total > best_ll:
+                best_ll = total
+                best_key = pair
+                best_params = {'gamma_base': pair[0], 'entropy_k': pair[1]}
+            if record_grid:
+                records.append({
+                    'fold': k, 'stage': 'fine', 'gamma_base': pair[0],
+                    'entropy_k': pair[1], 'll': float(total),
+                })
+
+        fold_best.append({'params': best_params, 'key': best_key, 'train_ll': best_ll})
+        fold_records.append(records)
+        fold_evals.append(len(coarse_pairs) + len(fine_grids[k]))
+
+    return fold_best, fold_records, fold_evals, cache, n_replays
+
+
+def _search_m3(exe, ref_logs, fold_train_idx, record_grid):
+    """Exhaustive per-profile grid search for M3, evaluated once for all folds.
+
+    This is the hot path of the experiment: the grid has no coarse/fine stage,
+    so it is entirely fold-independent and collapses from K passes to one.
+    """
+    gamma_vals = [1.0, 2.0, 2.5, 3.0, 4.0, 5.0]
+    xi_scale_hint = [0.5, 1.0, 2.0, 4.0]
+    xi_scale_arm = [0.5, 1.0, 2.0]
+
+    jobs = []
+    for gamma_p0 in gamma_vals:
+        for gamma_p1 in gamma_vals:
+            for hint_scale_p0 in xi_scale_hint:
+                for hint_scale_p1 in xi_scale_hint:
+                    for arm_scale_p0 in xi_scale_arm:
+                        for arm_scale_p1 in xi_scale_arm:
+                            gammas = [gamma_p0, gamma_p1]
+                            xi_scales = [
+                                [hint_scale_p0, arm_scale_p0, arm_scale_p0],
+                                [hint_scale_p1, arm_scale_p1, arm_scale_p1]
+                            ]
+                            key = (tuple(gammas), tuple(tuple(x) for x in xi_scales))
+                            jobs.append((key, (gammas, xi_scales)))
+
+    cache = {}
+    n_replays = _batch_ll_seqs(
+        exe, _eval_m3_params_per_profile_ll_seq, jobs, ref_logs, cache,
+        progress_desc="    ├─ Grid (M3)",
+    )
+
+    fold_best, fold_records, fold_evals = [], [], []
+    for k, train_idx in enumerate(fold_train_idx):
+        scores = {key: sum_over_mask(cache[key], train_idx) for key, _ in jobs}
+        records = []
+        if record_grid:
+            for key, (gammas, xi_scales) in jobs:
+                records.append({
+                    'fold': k,
+                    'stage': 'grid',
+                    'gamma_profile': json.dumps(gammas),
+                    'xi_scales': json.dumps(xi_scales),
+                    'll': float(scores[key]),
+                })
+
+        # Deterministic winner: argmax over all candidate scores with a stable
+        # (sorted-key) tie-break, so the result does not depend on the worker
+        # completion order that as_completed yields.
+        best_params = None
+        best_key = None
+        best_ll = -np.inf
+        if scores:
+            best_key = max(sorted(scores.keys()), key=lambda kk: scores[kk])
+            best_ll = scores[best_key]
+            gammas_c, xi_scales_c = best_key
+            best_params = {
+                'gamma_profile': list(gammas_c),
+                'xi_scales_profile': [list(x) for x in xi_scales_c],
+            }
+
+        fold_best.append({'params': best_params, 'key': best_key, 'train_ll': best_ll})
+        fold_records.append(records)
+        fold_evals.append(len(jobs))
+
+    return fold_best, fold_records, fold_evals, cache, n_replays
+
 
 def cv_fit_single_run(
     model_name,
@@ -278,284 +533,58 @@ def cv_fit_single_run(
     idx = np.arange(N)
     folds = np.array_split(idx, K)
 
-    fold_results = []
-    trial_rows_all = []
-    total_grid_evals = 0
-    run_start = time.time()
-    
-    try:
-        from tqdm import tqdm as _tqdm
-        use_progress = True
-    except ImportError:
-        use_progress = False
-
-    fold_iter = range(K)
-    if use_progress and K > 1:
-        fold_iter = _tqdm(fold_iter, desc=f"    ├─ Folds ({model_name})", leave=False, position=2)
-
-    for k in fold_iter:
+    # Fold index sets are computed up front because the parameter search below is
+    # shared across folds and needs all of them before it starts.
+    fold_train_idx = []
+    fold_test_idx = []
+    for k in range(K):
         test_idx = [int(i) for i in folds[k]]
         test_idx_set = set(test_idx)
         train_idx = [int(i) for i in idx if int(i) not in test_idx_set]
-        
         if K == 1 or len(train_idx) == 0:
             train_idx = list(range(N))
-        best_ll = -np.inf
-        best_params = None
-        fold_grid_records = []
-        fold_grid_evals = 0
+        fold_train_idx.append(train_idx)
+        fold_test_idx.append(test_idx)
 
+    logger = logging.getLogger(__name__)
+    run_start = time.time()
+
+    # One pool for the whole fit, rather than a fresh one per fold per search
+    # stage: workers (and the pymdp Agent each builds) are set up once.
+    workers, worker_desc = resolve_worker_count()
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=workers, initializer=_worker_init, initargs=(A, B, D)
+    ) as exe:
         if model_name == 'M1':
-            coarse_g = [0.5, 1.0, 1.5, 2.5, 4.0, 8.0, 12.0, 16.0]
-            max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-            coarse_scores = {}
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)
-            ) as exe:
-                fut_map = {}
-                for g in coarse_g:
-                    fold_grid_evals += 1
-                    fut = exe.submit(
-                        _eval_m1_gamma_masked, None, None, None, float(g), ref_logs, train_idx
-                    )
-                    fut_map[fut] = float(g)
-                for fut in concurrent.futures.as_completed(fut_map):
-                    g = fut_map[fut]
-                    try:
-                        val = fut.result()
-                    except Exception:
-                        val = -np.inf
-                    coarse_scores[g] = float(val)
-                    if record_grid:
-                        fold_grid_records.append(
-                            {'fold': k, 'stage': 'coarse', 'gamma': float(g), 'll': float(val)}
-                        )
-
-            best_g = max(coarse_scores, key=coarse_scores.get)
-            best_ll = coarse_scores[best_g]
-            best_params = {'gamma': best_g}
-
-            best_idx = int(coarse_g.index(best_g))
-            lo_idx = max(0, best_idx - 1)
-            hi_idx = min(len(coarse_g) - 1, best_idx + 1)
-            lo = coarse_g[lo_idx]
-            hi = coarse_g[hi_idx]
-            if best_idx == 0:
-                lo = max(0.1, coarse_g[0] * 0.5)
-            if best_idx == len(coarse_g) - 1:
-                hi = coarse_g[-1] * 1.25
-            fine_g = np.linspace(lo, hi, 7)
-            fine_scores = {}
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)
-            ) as exe:
-                fut_map = {}
-                for g in fine_g:
-                    fold_grid_evals += 1
-                    fut = exe.submit(
-                        _eval_m1_gamma_masked, None, None, None, float(g), ref_logs, train_idx
-                    )
-                    fut_map[fut] = float(g)
-                for fut in concurrent.futures.as_completed(fut_map):
-                    g = fut_map[fut]
-                    try:
-                        val = fut.result()
-                    except Exception:
-                        val = -np.inf
-                    fine_scores[float(g)] = float(val)
-                    if record_grid:
-                        fold_grid_records.append(
-                            {'fold': k, 'stage': 'fine', 'gamma': float(g), 'll': float(val)}
-                        )
-            for g, total in fine_scores.items():
-                if total > best_ll:
-                    best_ll = total
-                    best_params = {'gamma': float(g)}
-
+            search = _search_m1(exe, ref_logs, fold_train_idx, record_grid)
         elif model_name == 'M2':
-            coarse_g_base = [0.5, 1.0, 1.5, 2.5, 4.0, 8.0]
-            coarse_k = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0]
-            max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-            coarse_scores = np.zeros((len(coarse_g_base), len(coarse_k)))
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)
-            ) as exe:
-                fut_map = {}
-                for i, g_base in enumerate(coarse_g_base):
-                    for j, k_val in enumerate(coarse_k):
-                        fold_grid_evals += 1
-                        fut = exe.submit(
-                            _eval_m2_params_masked,
-                            None,
-                            None,
-                            None,
-                            float(g_base),
-                            float(k_val),
-                            ref_logs,
-                            train_idx,
-                        )
-                        fut_map[fut] = (i, j, float(g_base), float(k_val))
-                for fut in concurrent.futures.as_completed(fut_map):
-                    i, j, gb, kv = fut_map[fut]
-                    try:
-                        val = fut.result()
-                    except Exception:
-                        val = -np.inf
-                    coarse_scores[i, j] += float(val)
-                    if record_grid:
-                        fold_grid_records.append(
-                            {
-                                'fold': k,
-                                'stage': 'coarse',
-                                'gamma_base': gb,
-                                'entropy_k': kv,
-                                'll': float(val),
-                            }
-                        )
-
-            best_flat = np.argmax(coarse_scores)
-            bi, bj = np.unravel_index(best_flat, coarse_scores.shape)
-            best_ll = coarse_scores[bi, bj]
-            best_params = {'gamma_base': float(coarse_g_base[bi]), 'entropy_k': float(coarse_k[bj])}
-
-            gi_lo = max(0, bi - 1)
-            gi_hi = min(len(coarse_g_base) - 1, bi + 1)
-            gb_lo = coarse_g_base[gi_lo]
-            gb_hi = coarse_g_base[gi_hi]
-            if bi == 0:
-                gb_lo = max(0.1, coarse_g_base[0] * 0.5)
-            if bi == len(coarse_g_base) - 1:
-                gb_hi = coarse_g_base[-1] * 1.25
-
-            kj_lo = max(0, bj - 1)
-            kj_hi = min(len(coarse_k) - 1, bj + 1)
-            k_lo = coarse_k[kj_lo]
-            k_hi = coarse_k[kj_hi]
-            if bj == 0:
-                k_lo = max(1e-3, coarse_k[0] * 0.5)
-            if bj == len(coarse_k) - 1:
-                k_hi = coarse_k[-1] * 1.5
-
-            fine_gb = np.linspace(gb_lo, gb_hi, 6)
-            fine_k = np.linspace(k_lo, k_hi, 6)
-            fine_scores = {}
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)
-            ) as exe:
-                fut_map = {}
-                for g_base in fine_gb:
-                    for k_val in fine_k:
-                        fold_grid_evals += 1
-                        fut = exe.submit(
-                            _eval_m2_params_masked,
-                            None,
-                            None,
-                            None,
-                            float(g_base),
-                            float(k_val),
-                            ref_logs,
-                            train_idx,
-                        )
-                        fut_map[fut] = (float(g_base), float(k_val))
-                for fut in concurrent.futures.as_completed(fut_map):
-                    g_base, k_val = fut_map[fut]
-                    try:
-                        val = fut.result()
-                    except Exception:
-                        val = -np.inf
-                    fine_scores[(g_base, k_val)] = float(val)
-                    if record_grid:
-                        fold_grid_records.append(
-                            {
-                                'fold': k,
-                                'stage': 'fine',
-                                'gamma_base': g_base,
-                                'entropy_k': k_val,
-                                'll': float(val),
-                            }
-                        )
-            for (gb, kk), total in fine_scores.items():
-                if total > best_ll:
-                    best_ll = total
-                    best_params = {'gamma_base': float(gb), 'entropy_k': float(kk)}
-
+            search = _search_m2(exe, ref_logs, fold_train_idx, record_grid)
         elif model_name == 'M3':
-            policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
-            gamma_vals = [1.0, 2.0, 2.5, 3.0, 4.0, 5.0]
-            xi_scale_hint = [0.5, 1.0, 2.0, 4.0] 
-            xi_scale_arm = [0.5, 1.0, 2.0] 
-            
-            from itertools import product
-            num_profiles = len(M3_DEFAULTS['profiles'])
-            
-            candidates = []
-            for gamma_p0 in gamma_vals:
-                for gamma_p1 in gamma_vals:
-                    for hint_scale_p0 in xi_scale_hint:
-                        for hint_scale_p1 in xi_scale_hint:
-                            for arm_scale_p0 in xi_scale_arm:
-                                for arm_scale_p1 in xi_scale_arm:
-                                    gammas = [gamma_p0, gamma_p1]
-                                    xi_scales = [
-                                        [hint_scale_p0, arm_scale_p0, arm_scale_p0],
-                                        [hint_scale_p1, arm_scale_p1, arm_scale_p1]
-                                    ]
-                                    candidates.append((list(gammas), xi_scales))
-
-            # Parallelize M3 grid evaluation across workers
-            max_workers = int(os.environ.get('MODEL_COMP_MAX_WORKERS', os.cpu_count() or 1))
-            candidate_scores = {}
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=max_workers, initializer=_worker_init, initargs=(A, B, D)
-            ) as exe:
-                fut_map = {}
-                for gammas_c, xi_scales_c in candidates:
-                    fold_grid_evals += 1
-                    fut = exe.submit(
-                        _eval_m3_params_per_profile_masked,
-                        None, None, None,
-                        gammas_c,
-                        xi_scales_c,
-                        ref_logs,
-                        train_idx
-                    )
-                    fut_map[fut] = (gammas_c, xi_scales_c)
-                
-                for fut in concurrent.futures.as_completed(fut_map):
-                    gammas_c, xi_scales_c = fut_map[fut]
-                    try:
-                        tr_ll = fut.result()
-                    except Exception:
-                        tr_ll = -np.inf
-                    
-                    candidate_scores[(tuple(gammas_c), tuple(tuple(x) for x in xi_scales_c))] = float(tr_ll)
-                    
-                    if record_grid:
-                        fold_grid_records.append(
-                            {
-                                'fold': k,
-                                'stage': 'grid',
-                                'gamma_profile': json.dumps(gammas_c),
-                                'xi_scales': json.dumps(xi_scales_c),
-                                'll': float(tr_ll),
-                            }
-                        )
-                    
-            # Deterministic winner: argmax over all fully-collected candidate
-            # scores with a stable (sorted-key) tie-break, so the result does not
-            # depend on the worker completion order that as_completed yields.
-            if candidate_scores:
-                best_key = max(sorted(candidate_scores.keys()),
-                               key=lambda kk: candidate_scores[kk])
-                best_ll = candidate_scores[best_key]
-                gammas_c, xi_scales_c = best_key
-                best_params = {
-                    'gamma_profile': list(gammas_c),
-                    'xi_scales_profile': [list(x) for x in xi_scales_c],
-                }
-
+            search = _search_m3(exe, ref_logs, fold_train_idx, record_grid)
         else:
             raise ValueError(f"Unknown model for CV: {model_name}")
+    fold_best, fold_grid_records, fold_grid_evals, ll_cache, n_replays = search
+
+    total_grid_evals = sum(fold_grid_evals)
+    logger.debug(
+        "%s: %d grid points scored across %d folds using %d replays (%s)",
+        model_name, total_grid_evals, K, n_replays, worker_desc,
+    )
+
+    # M3 needs a policy set to rebuild a fitted value function. It is identical
+    # for every fold, so build it once instead of per fold.
+    policies = num_actions_per_factor = None
+    if model_name == 'M3':
+        policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
+
+    fold_results = []
+    trial_rows_all = []
+    trial_rows_cache = {}
+
+    for k in range(K):
+        train_idx = fold_train_idx[k]
+        test_idx = fold_test_idx[k]
+        best_params = fold_best[k]['params']
 
         if best_params is None:
             train_ll = float('-inf')
@@ -575,25 +604,12 @@ def cv_fit_single_run(
                     'M2', C_reward_logits=M2_DEFAULTS['C_reward_logits'], gamma_schedule=gamma_schedule
                 )
             else:
-                policies, num_actions_per_factor = _make_temp_agent_and_policies(A, B, D)
-                profiles = []
                 if 'gamma_profile' in best_params and 'xi_scales_profile' in best_params:
-                    gamma_profile = best_params['gamma_profile']
-                    xi_scales_profile = best_params['xi_scales_profile']
-                    for p_idx, p in enumerate(M3_DEFAULTS['profiles']):
-                        prof = dict(p)
-                        prof['gamma'] = float(gamma_profile[p_idx])
-                        orig_xi = np.array(p['xi_logits'], float)
-                        scales3 = xi_scales_profile[p_idx]
-                        new_xi = orig_xi.copy()
-                        new_xi[1] = orig_xi[1] * float(scales3[0])
-                        new_xi[2] = orig_xi[2] * float(scales3[1])
-                        new_xi[3] = orig_xi[3] * float(scales3[2])
-                        prof['xi_logits'] = new_xi.tolist()
-                        profiles.append(prof)
+                    profiles = build_m3_profiles(
+                        best_params['gamma_profile'], best_params['xi_scales_profile']
+                    )
                 else:
-                    for p in M3_DEFAULTS['profiles']:
-                        profiles.append(dict(p))
+                    profiles = [dict(p) for p in M3_DEFAULTS['profiles']]
                 value_fn_best = make_value_fn(
                     'M3',
                     profiles=profiles,
@@ -602,8 +618,11 @@ def cv_fit_single_run(
                     num_actions_per_factor=num_actions_per_factor,
                 )
 
-            train_ll, _ = evaluate_ll_with_valuefn_masked(value_fn_best, A, B, D, ref_logs, train_idx)
-            test_ll, _ = evaluate_ll_with_valuefn_masked(value_fn_best, A, B, D, ref_logs, test_idx)
+            # The winning candidate's per-trial vector is already cached from the
+            # grid search, so both scores are sums over it -- no further replays.
+            winner_ll_seq = ll_cache[fold_best[k]['key']]
+            train_ll = sum_over_mask(winner_ll_seq, train_idx)
+            test_ll = sum_over_mask(winner_ll_seq, test_idx)
 
         fold_entry = {
             'fold': k,
@@ -612,12 +631,20 @@ def cv_fit_single_run(
             'test_ll': float(test_ll),
             'train_idx': train_idx,
             'test_idx': test_idx,
-            'grid_evals': fold_grid_evals,
+            'grid_evals': fold_grid_evals[k],
         }
 
         rows = []
         if value_fn_best is not None:
-            rows = _generate_trial_level_predictions(value_fn_best, A, B, D, ref_logs)
+            # Folds that selected the same parameters produce identical
+            # predictions, so replay once per distinct winner and relabel.
+            params_key = json.dumps(_to_native(best_params), sort_keys=True)
+            cached_rows = trial_rows_cache.get(params_key)
+            if cached_rows is None:
+                cached_rows = _generate_trial_level_predictions(value_fn_best, A, B, D, ref_logs)
+                trial_rows_cache[params_key] = cached_rows
+            rows = [dict(r) for r in cached_rows]
+
             role_mask = set(test_idx)
             for r in rows:
                 r['fold'] = k
@@ -630,13 +657,13 @@ def cv_fit_single_run(
             if test_rows:
                 fold_entry['test_acc'] = float(np.mean([r['accuracy'] for r in test_rows]))
         fold_results.append(fold_entry)
-        total_grid_evals += fold_grid_evals
 
-        if record_grid and fold_grid_records and generator and run_id is not None and save_artifacts:
+        fold_records = fold_grid_records[k]
+        if record_grid and fold_records and generator and run_id is not None and save_artifacts:
             grid_path = _grid_eval_path(generator, model_name, run_id, k, artifact_base_dir)
-            fieldnames = sorted({key for rec in fold_grid_records for key in rec.keys()})
+            fieldnames = sorted({key for rec in fold_records for key in rec.keys()})
             rows_to_write = []
-            for rec in fold_grid_records:
+            for rec in fold_records:
                 row = {key: rec.get(key, '') for key in fieldnames}
                 rows_to_write.append(row)
             _write_dict_csv(grid_path, fieldnames, rows_to_write, mode='w')
@@ -855,6 +882,13 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
         # H[q(pi)] varies with the EFE landscape even at fixed gamma (M1), so it
         # captures uncertainty-sensitivity that gamma alone does not show.
         policy_entropy = float(compute_entropy(np.asarray(q_pi, dtype=float)))
+        # Per-policy EFE, logged so the gamma-independent driver of H[q(pi)] can be
+        # recovered offline: dG = G(pi_2nd-best) - G(pi_best). Kept as the full
+        # vector rather than a summary so other contrasts stay available.
+        # NOTE: pymdp's infer_policies returns the NEGATIVE expected free energy
+        # (q_pi = softmax(gamma * G + lnE), so higher is better). Negate here so the
+        # column holds EFE proper -- lower is better, best policy = argmin.
+        efe_vec = (-np.asarray(efe, dtype=float).ravel()).tolist()
         q_better_arm = np.asarray(qs[1], dtype=float)
         better_arm_entropy = float(compute_entropy(q_better_arm))
 
@@ -923,6 +957,7 @@ def _generate_trial_level_predictions(value_fn, A, B, D, ref_logs):
             'gamma': float(runner.agent.gamma),
             'policy_entropy': policy_entropy,
             'better_arm_entropy': better_arm_entropy,
+            'efe': efe_vec,
             'll': float(ll_t),
             'accuracy': int(acc),
             'is_reversal': is_reversal,
@@ -974,6 +1009,7 @@ def save_trial_level_csv(rows, out_path):
         'gamma',
         'policy_entropy',
         'better_arm_entropy',
+        'efe',
         'll',
         'accuracy',
         'is_reversal',
@@ -1003,6 +1039,7 @@ def save_trial_level_csv(rows, out_path):
                 f"{r['gamma']:.6f}",
                 f"{r['policy_entropy']:.6f}",
                 f"{r['better_arm_entropy']:.6f}",
+                _json.dumps(r['efe']),
                 f"{r['ll']:.6f}",
                 r['accuracy'],
                 r['is_reversal'],
