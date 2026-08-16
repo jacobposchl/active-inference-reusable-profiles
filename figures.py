@@ -65,6 +65,15 @@ def apply_style():
     })
 
 
+def save_figure(fig, out_path):
+    """Write the figure to out_path and, alongside it, a vector .pdf for the paper."""
+    fig.savefig(out_path)
+    root, ext = os.path.splitext(out_path)
+    if ext.lower() != ".pdf":
+        fig.savefig(root + ".pdf")
+    plt.close(fig)
+
+
 def clean(ax, grid_axis="y", frame=True):
     # frame=True keeps the full boundary box (all four spines); the title is
     # drawn above the axes box, so it stays outside the box.
@@ -224,8 +233,7 @@ def fig_aic(run_dir, out_path):
     clean(ax, "y")
     ax.set_ylim(0, vals.max() * 1.12)
     fig.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 # ============================ FIGURE 1: MECHANISTIC ============================
@@ -307,7 +315,9 @@ def fig_mechanistic(run_dir, out_path):
         axD.axis("off")
     panel_tag(axD, "D")
 
-    # --- E: mean precision by inferred context, per model ---
+    # --- E: mean precision by true context, per model ---
+    # by_context() splits on `true_context`, not the agent's posterior, so this
+    # and panel F are conditioned on the generating regime.
     xm = np.arange(3)
     w = 0.36
     for j, ctx in enumerate(("volatile", "stable")):
@@ -318,7 +328,7 @@ def fig_mechanistic(run_dir, out_path):
                 error_kw=dict(elinewidth=0.8, capsize=2.5, capthick=0.8, ecolor=INK2))
     axE.set_xticks(xm)
     axE.set_xticklabels(("M1", "M2", "M3"))
-    axE.set_title("Precision by inferred context")
+    axE.set_title("Precision by true context")
     axE.set_ylabel(r"Mean $\gamma$")
     axE.set_xlabel("Model")
     axE.legend()
@@ -338,7 +348,7 @@ def fig_mechanistic(run_dir, out_path):
     axF.set_xlim(-0.6, 1.6)
     axF.set_title("Context-conditional hint-seeking (M3)")
     axF.set_ylabel("Hint-seeking rate")
-    axF.set_xlabel("Inferred context")
+    axF.set_xlabel("True context")
     axF.set_ylim(0, 1)
     clean(axF, "y")
     panel_tag(axF, "F")
@@ -383,8 +393,7 @@ def fig_mechanistic(run_dir, out_path):
     panel_tag(axH, "H")
 
     fig.tight_layout(w_pad=2.5, h_pad=3.0)
-    fig.savefig(out_path)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 # ============================ MAIN ============================
@@ -403,7 +412,8 @@ def main():
     mech_path = os.path.join(out_dir, "mechanistic_analysis.png")
     fig_aic(args.results_dir, aic_path)
     fig_mechanistic(args.results_dir, mech_path)
-    print(f"wrote:\n  {aic_path}\n  {mech_path}")
+    print("wrote (each as .png and .pdf):\n"
+          f"  {aic_path}\n  {mech_path}")
 
 
 if __name__ == "__main__":

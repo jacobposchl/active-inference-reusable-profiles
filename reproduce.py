@@ -38,8 +38,9 @@ from figures import apply_style, fig_aic, fig_mechanistic
 def build_figures(results_dir, figures_dir):
     """Render both paper figures from a single results directory (via figures.py).
 
-    Figures are written under a per-run subfolder so each run's outputs are
-    self-contained and traceable to the run that produced them.
+    Each figure is written as a .png (screen/preview) and a .pdf (vector, for the
+    paper), under a per-run subfolder so each run's outputs are self-contained
+    and traceable to the run that produced them.
     """
     apply_style()
     run_label = os.path.basename(os.path.normpath(results_dir))
@@ -119,7 +120,8 @@ def main():
         print(f"[reproduce] experiment complete -> {run_dir}")
 
     out_dir = build_figures(run_dir, args.figures_dir)
-    print(f"\n[reproduce] done.\n  run dir : {run_dir}\n  figures : {out_dir}/")
+    print(f"\n[reproduce] done.\n  run dir : {run_dir}\n"
+          f"  figures : {out_dir}/ (.png and .pdf)")
 
 
 if __name__ == '__main__':
